@@ -1,0 +1,70 @@
+{
+  "nav": {
+    "menu": "Menu",
+    "cart": "Cart",
+    "orders": "Orders"
+  },
+  "menu": {
+    "addToCart": "Add to cart",
+    "outOfStock": "Sold out",
+    "spicy": "Spicy",
+    "search": "Search menu..."
+  },
+  "cart": {
+    "title": "My cart",
+    "empty": "Your cart is empty",
+    "subtotal": "Subtotal",
+    "checkout": "Place order",
+    "note": "Note",
+    "notePlaceholder": "Allergies, no vegetables...",
+    "quantity": "Qty",
+    "remove": "Remove"
+  },
+  "checkout": {
+    "title": "Payment",
+    "payWith": "Pay with",
+    "promptpay": "PromptPay",
+    "truemoney": "TrueMoney Wallet",
+    "alipay": "Alipay+",
+    "cash": "Pay at cashier",
+    "total": "Total",
+    "scanQR": "Scan QR to pay",
+    "waitingPayment": "Waiting for payment...",
+    "paymentSuccess": "Payment successful!",
+    "cashNote": "Please notify staff for your bill",
+    "orderPlaced": "Order placed!"
+  },
+  "session": {
+    "welcome": "Welcome",
+    "table": "Table",
+    "yourName": "Your name (optional)",
+    "namePlaceholder": "e.g. Ann, Person 1",
+    "join": "Join table",
+    "guestsOrdering": "{{count}} people ordering"
+  },
+  "order": {
+    "status": {
+      "pending": "Pending",
+      "confirmed": "Confirmed",
+      "cooking": "Cooking",
+      "served": "Served",
+      "cancelled": "Cancelled"
+    }
+  },
+  "allergens": {
+    "nuts": "Nuts",
+    "gluten": "Gluten",
+    "seafood": "Seafood",
+    "dairy": "Dairy",
+    "eggs": "Eggs",
+    "pork": "Pork"
+  },
+  "common": {
+    "baht": "THB",
+    "close": "Close",
+    "confirm": "Confirm",
+    "cancel": "Cancel",
+    "loading": "Loading...",
+    "error": "Something went wrong"
+  }
+}

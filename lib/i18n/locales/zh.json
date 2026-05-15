@@ -1,0 +1,70 @@
+{
+  "nav": {
+    "menu": "菜单",
+    "cart": "购物车",
+    "orders": "订单"
+  },
+  "menu": {
+    "addToCart": "加入购物车",
+    "outOfStock": "售罄",
+    "spicy": "辣",
+    "search": "搜索菜单..."
+  },
+  "cart": {
+    "title": "我的购物车",
+    "empty": "购物车为空",
+    "subtotal": "小计",
+    "checkout": "下单",
+    "note": "备注",
+    "notePlaceholder": "过敏信息，不要蔬菜...",
+    "quantity": "数量",
+    "remove": "删除"
+  },
+  "checkout": {
+    "title": "付款",
+    "payWith": "付款方式",
+    "promptpay": "PromptPay",
+    "truemoney": "TrueMoney钱包",
+    "alipay": "支付宝+",
+    "cash": "到收银台付款",
+    "total": "总计",
+    "scanQR": "扫码付款",
+    "waitingPayment": "等待付款...",
+    "paymentSuccess": "付款成功！",
+    "cashNote": "请通知服务员结账",
+    "orderPlaced": "下单成功！"
+  },
+  "session": {
+    "welcome": "欢迎",
+    "table": "桌",
+    "yourName": "您的姓名（可选）",
+    "namePlaceholder": "例如：小明",
+    "join": "加入桌台",
+    "guestsOrdering": "{{count}}人正在点餐"
+  },
+  "order": {
+    "status": {
+      "pending": "待确认",
+      "confirmed": "已确认",
+      "cooking": "制作中",
+      "served": "已上菜",
+      "cancelled": "已取消"
+    }
+  },
+  "allergens": {
+    "nuts": "坚果",
+    "gluten": "麸质",
+    "seafood": "海鲜",
+    "dairy": "乳制品",
+    "eggs": "鸡蛋",
+    "pork": "猪肉"
+  },
+  "common": {
+    "baht": "泰铢",
+    "close": "关闭",
+    "confirm": "确认",
+    "cancel": "取消",
+    "loading": "加载中...",
+    "error": "出现错误"
+  }
+}

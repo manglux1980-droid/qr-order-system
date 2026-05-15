@@ -1,0 +1,70 @@
+{
+  "nav": {
+    "menu": "메뉴",
+    "cart": "장바구니",
+    "orders": "주문"
+  },
+  "menu": {
+    "addToCart": "장바구니에 추가",
+    "outOfStock": "품절",
+    "spicy": "매운맛",
+    "search": "메뉴 검색..."
+  },
+  "cart": {
+    "title": "내 장바구니",
+    "empty": "장바구니가 비어 있습니다",
+    "subtotal": "소계",
+    "checkout": "주문하기",
+    "note": "메모",
+    "notePlaceholder": "알레르기, 채소 제외...",
+    "quantity": "수량",
+    "remove": "삭제"
+  },
+  "checkout": {
+    "title": "결제",
+    "payWith": "결제 방법",
+    "promptpay": "PromptPay",
+    "truemoney": "TrueMoney 지갑",
+    "alipay": "Alipay+",
+    "cash": "카운터에서 결제",
+    "total": "합계",
+    "scanQR": "QR 코드를 스캔하여 결제",
+    "waitingPayment": "결제 대기 중...",
+    "paymentSuccess": "결제 완료!",
+    "cashNote": "직원에게 계산서를 요청하세요",
+    "orderPlaced": "주문 완료!"
+  },
+  "session": {
+    "welcome": "환영합니다",
+    "table": "테이블",
+    "yourName": "이름 (선택사항)",
+    "namePlaceholder": "예: 김민준",
+    "join": "테이블 참여",
+    "guestsOrdering": "{{count}}명 주문 중"
+  },
+  "order": {
+    "status": {
+      "pending": "확인 대기",
+      "confirmed": "확인됨",
+      "cooking": "조리 중",
+      "served": "서빙 완료",
+      "cancelled": "취소됨"
+    }
+  },
+  "allergens": {
+    "nuts": "견과류",
+    "gluten": "글루텐",
+    "seafood": "해산물",
+    "dairy": "유제품",
+    "eggs": "달걀",
+    "pork": "돼지고기"
+  },
+  "common": {
+    "baht": "바트",
+    "close": "닫기",
+    "confirm": "확인",
+    "cancel": "취소",
+    "loading": "로딩 중...",
+    "error": "오류가 발생했습니다"
+  }
+}

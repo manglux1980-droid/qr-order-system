@@ -1,0 +1,70 @@
+{
+  "nav": {
+    "menu": "เมนู",
+    "cart": "ตะกร้า",
+    "orders": "คำสั่ง"
+  },
+  "menu": {
+    "addToCart": "เพิ่มลงตะกร้า",
+    "outOfStock": "หมด",
+    "spicy": "เผ็ด",
+    "search": "ค้นหาเมนู..."
+  },
+  "cart": {
+    "title": "ตะกร้าของฉัน",
+    "empty": "ยังไม่มีรายการ",
+    "subtotal": "ยอดรวม",
+    "checkout": "สั่งอาหาร",
+    "note": "หมายเหตุ",
+    "notePlaceholder": "แพ้อาหาร, ไม่ใส่ผัก...",
+    "quantity": "จำนวน",
+    "remove": "ลบ"
+  },
+  "checkout": {
+    "title": "ชำระเงิน",
+    "payWith": "ชำระด้วย",
+    "promptpay": "PromptPay",
+    "truemoney": "TrueMoney Wallet",
+    "alipay": "Alipay+",
+    "cash": "จ่ายที่แคชเชียร์",
+    "total": "ยอดรวมทั้งหมด",
+    "scanQR": "สแกน QR เพื่อชำระ",
+    "waitingPayment": "รอการชำระเงิน...",
+    "paymentSuccess": "ชำระเงินสำเร็จ!",
+    "cashNote": "แจ้งพนักงานเพื่อรับบิล",
+    "orderPlaced": "สั่งอาหารเรียบร้อย"
+  },
+  "session": {
+    "welcome": "ยินดีต้อนรับ",
+    "table": "โต๊ะ",
+    "yourName": "ชื่อของคุณ (ไม่บังคับ)",
+    "namePlaceholder": "เช่น แอน, คนที่ 1",
+    "join": "เข้าร่วมโต๊ะ",
+    "guestsOrdering": "กำลังสั่งอาหาร {{count}} คน"
+  },
+  "order": {
+    "status": {
+      "pending": "รอยืนยัน",
+      "confirmed": "ยืนยันแล้ว",
+      "cooking": "กำลังทำ",
+      "served": "เสิร์ฟแล้ว",
+      "cancelled": "ยกเลิก"
+    }
+  },
+  "allergens": {
+    "nuts": "ถั่ว",
+    "gluten": "กลูเตน",
+    "seafood": "อาหารทะเล",
+    "dairy": "นม",
+    "eggs": "ไข่",
+    "pork": "หมู"
+  },
+  "common": {
+    "baht": "บาท",
+    "close": "ปิด",
+    "confirm": "ยืนยัน",
+    "cancel": "ยกเลิก",
+    "loading": "กำลังโหลด...",
+    "error": "เกิดข้อผิดพลาด"
+  }
+}
