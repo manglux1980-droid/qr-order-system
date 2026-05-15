@@ -19,20 +19,22 @@ export async function POST(req: NextRequest) {
 
   if (!table) return NextResponse.json({ error: 'table not found' }, { status: 404 })
 
-  // Check for open session
+  // Check for ANY active session (open / ordering / paying)
+  // Include 'paying' so that if a customer pressed "ขอจ่ายเงิน" but a friend at the
+  // same table is still ordering, the friend joins the same session/bill.
   const { data: existing } = await supabase
     .from('table_sessions')
     .select('*')
     .eq('table_id', table.id)
-    .in('status', ['open', 'ordering'])
+    .in('status', ['open', 'ordering', 'paying'])
     .order('opened_at', { ascending: false })
     .limit(1)
-    .single()
+    .maybeSingle()
 
   let session = existing
 
   if (!session) {
-    // Create new session
+    // Create new session (new group of guests)
     const { data: newSession } = await supabase
       .from('table_sessions')
       .insert({
@@ -45,11 +47,20 @@ export async function POST(req: NextRequest) {
       .single()
     session = newSession
   } else {
-    // Increment guest count
-    await supabase
-      .from('table_sessions')
-      .update({ guest_count: (session.guest_count || 1) + 1 })
-      .eq('id', session.id)
+    // Only increment guest_count if this device is new to the session
+    const { data: existingOrderForDevice } = await supabase
+      .from('orders')
+      .select('id')
+      .eq('session_id', session.id)
+      .eq('device_id', device_id)
+      .maybeSingle()
+
+    if (!existingOrderForDevice) {
+      await supabase
+        .from('table_sessions')
+        .update({ guest_count: (session.guest_count || 1) + 1 })
+        .eq('id', session.id)
+    }
   }
 
   // Create order for this device if not exists
@@ -58,7 +69,7 @@ export async function POST(req: NextRequest) {
     .select('id')
     .eq('session_id', session.id)
     .eq('device_id', device_id)
-    .single()
+    .maybeSingle()
 
   let order = existingOrder
   if (!order) {

@@ -3,13 +3,18 @@
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { UtensilsCrossed, QrCode, LayoutDashboard, LogOut, ChefHat, CreditCard } from 'lucide-react'
+import { UtensilsCrossed, QrCode, LayoutDashboard, LogOut, ChefHat, CreditCard, SlidersHorizontal, Smartphone } from 'lucide-react'
 
 const navItems = [
+  // Setup
   { href: '/admin/menu', label: 'จัดการเมนู', icon: UtensilsCrossed },
+  { href: '/admin/options', label: 'ตัวเลือกพิเศษ', icon: SlidersHorizontal },
   { href: '/admin/tables', label: 'จัดการโต๊ะ / QR', icon: QrCode },
+  { href: '/admin/preorder-qr', label: 'QR สั่งล่วงหน้า', icon: Smartphone },
+  // Operations
   { href: '/admin/orders', label: 'ออเดอร์ (KDS)', icon: ChefHat },
   { href: '/admin/cashier', label: 'แคชเชียร์', icon: CreditCard },
+  // Insights
   { href: '/admin/dashboard', label: 'ภาพรวม', icon: LayoutDashboard },
 ]
 
@@ -25,7 +30,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
-      {/* Sidebar */}
       <aside className="w-56 bg-white border-r border-gray-200 flex flex-col fixed h-full">
         <div className="p-4 border-b border-gray-100">
           <div className="flex items-center gap-2">
@@ -34,7 +38,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </div>
         </div>
 
-        <nav className="flex-1 p-3 space-y-1">
+        <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
           {navItems.map(({ href, label, icon: Icon }) => (
             <Link
               key={href}
@@ -62,7 +66,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </div>
       </aside>
 
-      {/* Main content */}
       <main className="flex-1 ml-56 p-6">
         {children}
       </main>

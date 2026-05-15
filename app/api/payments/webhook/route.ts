@@ -1,65 +1,75 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase/server'
-import crypto from 'crypto'
+import { NextRequest, NextResponse } from 'next/server';
+import { createServiceClient } from '@/lib/supabase/server';
+import crypto from 'crypto';
 
+// POST /api/payments/webhook
+// Omise sends payment status updates here
 export async function POST(req: NextRequest) {
-  const rawBody = await req.text()
+  const body = await req.text();
+  const signature = req.headers.get('omise-signature') || '';
 
-  // Verify Omise webhook signature
-  const signature = req.headers.get('omise-signature')
-  const secret = process.env.OMISE_WEBHOOK_SECRET
-
-  if (secret && signature) {
-    const expected = crypto
-      .createHmac('sha256', secret)
-      .update(rawBody)
-      .digest('hex')
+  // Verify signature
+  const secret = process.env.OMISE_WEBHOOK_SECRET;
+  if (secret) {
+    const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
     if (signature !== expected) {
-      return NextResponse.json({ error: 'invalid signature' }, { status: 401 })
+      return NextResponse.json({ error: 'invalid signature' }, { status: 401 });
     }
   }
 
-  const event = JSON.parse(rawBody)
+  const event = JSON.parse(body);
+  const supabase = await createServiceClient();
 
-  if (event.key !== 'charge.complete' && event.key !== 'charge.expire') {
-    return NextResponse.json({ ok: true })
+  // Only handle charge.complete or charge.update
+  if (event.key !== 'charge.complete' && event.key !== 'charge.update') {
+    return NextResponse.json({ ok: true });
   }
 
-  const charge = event.data
-  const paymentId = charge.metadata?.payment_id
+  const charge = event.data;
+  if (!charge?.id) return NextResponse.json({ ok: true });
 
-  if (!paymentId) return NextResponse.json({ error: 'no payment_id' }, { status: 400 })
-
-  const supabase = await createServiceClient()
-  const newStatus = charge.status === 'successful' ? 'paid' : 'failed'
-
-  await supabase
+  // Find payment by Omise charge ID
+  const { data: payment } = await supabase
     .from('payments')
-    .update({
-      status: newStatus,
-      paid_at: newStatus === 'paid' ? new Date().toISOString() : null,
-    })
-    .eq('id', paymentId)
+    .select('id, status, session_id, restaurant_id')
+    .eq('omise_charge_id', charge.id)
+    .single();
 
-  if (newStatus === 'paid') {
-    const { data: payment } = await supabase
+  if (!payment) return NextResponse.json({ ok: true });
+  if (payment.status === 'paid') return NextResponse.json({ ok: true });
+
+  if (charge.status === 'successful' || charge.paid === true) {
+    const nowIso = new Date().toISOString();
+
+    // Mark payment paid
+    await supabase
       .from('payments')
-      .select('session_id')
-      .eq('id', paymentId)
-      .single()
+      .update({ status: 'paid', paid_at: nowIso })
+      .eq('id', payment.id);
 
-    if (payment?.session_id) {
+    // ─── Dine-in: close session ───
+    if (payment.session_id) {
       await supabase
         .from('table_sessions')
-        .update({ status: 'closed', closed_at: new Date().toISOString() })
-        .eq('id', payment.session_id)
+        .update({ status: 'closed', closed_at: nowIso })
+        .eq('id', payment.session_id);
+    }
 
+    // ─── Pre-order: confirm order (move to confirmed so it shows in KDS) ───
+    const orderId = charge.metadata?.order_id;
+    const orderType = charge.metadata?.order_type;
+    if (orderType === 'preorder' && orderId) {
       await supabase
         .from('orders')
-        .update({ status: 'served' })
-        .eq('session_id', payment.session_id)
+        .update({ status: 'confirmed' })
+        .eq('id', orderId);
     }
+  } else if (charge.status === 'failed' || charge.status === 'expired') {
+    await supabase
+      .from('payments')
+      .update({ status: 'failed' })
+      .eq('id', payment.id);
   }
 
-  return NextResponse.json({ ok: true })
+  return NextResponse.json({ ok: true });
 }

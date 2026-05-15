@@ -1,10 +1,10 @@
 'use client'
 
-import { useEffect, useState, use } from 'react'
+import { useEffect, useState, useCallback, use } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getMenuName, getMenuDesc, getCategoryName, localeNames } from '@/lib/i18n/config'
-import type { MenuItem, MenuCategory, Locale, CartItem } from '@/lib/types'
-import { Globe, Minus, Plus, X } from 'lucide-react'
+import type { MenuItem, MenuCategory, Locale } from '@/lib/types'
+import { Globe, Minus, Plus, X, ArrowLeft, ShoppingCart, ChevronRight } from 'lucide-react'
 import PaymentModal from '@/components/customer/PaymentModal'
 
 function getOrCreateDeviceId(): string {
@@ -17,6 +17,58 @@ function getOrCreateDeviceId(): string {
   return id
 }
 
+// ─── Types ───
+type OptionGroupItem = {
+  id: string
+  name_th: string
+  name_en: string | null
+  name_zh: string | null
+  name_ja: string | null
+  name_ko: string | null
+  price_delta: number
+  image_url: string | null
+}
+
+type OptionGroup = {
+  id: string
+  name_th: string
+  name_en: string | null
+  name_zh: string | null
+  name_ja: string | null
+  name_ko: string | null
+  selection_type: 'single' | 'multi'
+  is_required: boolean
+  option_group_items: OptionGroupItem[]
+}
+
+type SelectedOption = {
+  group_id: string
+  group_name: string
+  option_id: string
+  option_name: string
+  price_delta: number
+  quantity: number  // for multi-select +/- counter (single is always 1)
+}
+
+type CartItem = {
+  cartId: string  // unique per cart line
+  menuItem: MenuItem
+  quantity: number
+  selectedOptions: SelectedOption[]
+  note?: string
+  unitPrice: number  // base price + sum of options
+}
+
+type SubmittedItem = {
+  name: string
+  qty: number
+  subtotal: number
+  options: string[]
+  createdAt: string
+}
+
+type Step = 'categories' | 'items' | 'option_picker'
+
 export default function CustomerMenuPage({
   params,
 }: {
@@ -25,21 +77,46 @@ export default function CustomerMenuPage({
   const { slug, tableToken } = use(params)
   const supabase = createClient()
 
+  // ─── i18n ───
   const [locale, setLocale] = useState<Locale>('th')
   const [showLangPicker, setShowLangPicker] = useState(false)
+
+  // ─── Data ───
   const [categories, setCategories] = useState<MenuCategory[]>([])
   const [items, setItems] = useState<MenuItem[]>([])
-  const [cart, setCart] = useState<CartItem[]>([])
-  const [showCart, setShowCart] = useState(false)
-  const [activeCategory, setActiveCategory] = useState<string>('')
+  const [optionGroupsByItem, setOptionGroupsByItem] = useState<Record<string, OptionGroup[]>>({})
   const [loading, setLoading] = useState(true)
-  const [session, setSession] = useState<{ id: string } | null>(null)
+  const [restaurantName, setRestaurantName] = useState('')
+
+  // ─── Session ───
+  const [session, setSession] = useState<{ id: string; status?: string } | null>(null)
   const [order, setOrder] = useState<{ id: string } | null>(null)
   const [table, setTable] = useState<{ table_number: number; label: string | null } | null>(null)
-  const [submitting, setSubmitting] = useState(false)
-  const [showPayment, setShowPayment] = useState(false)
-  const [paymentAmount, setPaymentAmount] = useState(0)
 
+  // ─── Navigation state ───
+  const [step, setStep] = useState<Step>('categories')
+  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null)
+  const [pickingItem, setPickingItem] = useState<MenuItem | null>(null)
+
+  // ─── Cart ───
+  const [cart, setCart] = useState<CartItem[]>([])
+  const [showCart, setShowCart] = useState(false)
+  const [showBill, setShowBill] = useState(false)
+  const [showSuccess, setShowSuccess] = useState(false)
+
+  // ─── Bill (from server) ───
+  const [submittedItems, setSubmittedItems] = useState<SubmittedItem[]>([])
+  const [billTotal, setBillTotal] = useState(0)
+  const [sessionStatus, setSessionStatus] = useState<string>('open')
+  const [sessionClosed, setSessionClosed] = useState(false)
+  const [paidAmount, setPaidAmount] = useState(0)
+  const [requestingBill, setRequestingBill] = useState(false)
+
+  // ─── QR payment ───
+  const [showPayment, setShowPayment] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+
+  // ─── i18n detect ───
   useEffect(() => {
     const lang = navigator.language.toLowerCase()
     if (lang.startsWith('zh')) setLocale('zh')
@@ -49,94 +126,292 @@ export default function CustomerMenuPage({
     else setLocale('en')
   }, [])
 
+  // ─── Init ───
   useEffect(() => { init() }, [slug, tableToken])
 
   async function init() {
     setLoading(true)
     const deviceId = getOrCreateDeviceId()
+
     const res = await fetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ table_token: tableToken, device_id: deviceId }),
     })
     const data = await res.json()
-    if (data.session) setSession(data.session)
+    if (data.session) {
+      setSession(data.session)
+      setSessionStatus(data.session.status || 'open')
+    }
     if (data.order) setOrder(data.order)
     if (data.table) setTable(data.table)
 
     const { data: restaurant } = await supabase
       .from('restaurants')
-      .select('id')
+      .select('id, name_th, name_en')
       .eq('slug', slug)
       .single()
 
     if (restaurant) {
-      const [{ data: cats }, { data: menuItems }] = await Promise.all([
+      setRestaurantName(locale === 'th' ? restaurant.name_th : (restaurant.name_en || restaurant.name_th))
+
+      const [{ data: cats }, { data: menuItems }, { data: links }] = await Promise.all([
         supabase.from('menu_categories').select('*').eq('restaurant_id', restaurant.id).eq('is_active', true).order('sort_order'),
         supabase.from('menu_items').select('*').eq('restaurant_id', restaurant.id).eq('is_available', true).order('sort_order'),
+        supabase
+          .from('menu_item_option_groups')
+          .select(`
+            menu_item_id, sort_order,
+            option_groups!inner (
+              id, name_th, name_en, name_zh, name_ja, name_ko,
+              selection_type, is_required,
+              option_group_items (
+                id, name_th, name_en, name_zh, name_ja, name_ko,
+                price_delta, image_url, sort_order
+              )
+            )
+          `)
+          .eq('option_groups.is_active', true),
       ])
+
       setCategories(cats || [])
       setItems(menuItems || [])
-      if (cats?.length) setActiveCategory(cats[0].id)
+
+      // Group option groups by menu_item_id
+      const groupMap: Record<string, OptionGroup[]> = {}
+      type LinkRow = {
+        menu_item_id: string
+        sort_order: number
+        option_groups: OptionGroup
+      }
+      for (const link of ((links as unknown) as LinkRow[] ?? [])) {
+        const mid = link.menu_item_id
+        if (!groupMap[mid]) groupMap[mid] = []
+        // Sort items inside group by sort_order
+        const g = link.option_groups
+        g.option_group_items = (g.option_group_items ?? []).sort((a, b) =>
+          // @ts-expect-error sort_order is defined on option_group_items but not in type
+          (a.sort_order ?? 0) - (b.sort_order ?? 0)
+        )
+        groupMap[mid].push(g)
+      }
+      setOptionGroupsByItem(groupMap)
     }
     setLoading(false)
   }
 
-  function addToCart(item: MenuItem) {
-    setCart(prev => {
-      const existing = prev.find(c => c.menuItem.id === item.id)
-      if (existing) return prev.map(c => c.menuItem.id === item.id ? { ...c, quantity: c.quantity + 1 } : c)
-      return [...prev, { menuItem: item, quantity: 1 }]
-    })
-  }
+  // ─── Refresh bill ───
+  const refreshBill = useCallback(async () => {
+    if (!session?.id) return
+    const { data: sess } = await supabase
+      .from('table_sessions')
+      .select(`
+        status,
+        orders (
+          status, created_at,
+          order_items (
+            quantity, price_snapshot, options_snapshot,
+            menu_items ( name_th, name_en, name_zh, name_ja, name_ko )
+          )
+        )
+      `)
+      .eq('id', session.id)
+      .single()
 
-  function removeFromCart(itemId: string) {
-    setCart(prev => {
-      const existing = prev.find(c => c.menuItem.id === itemId)
-      if (!existing) return prev
-      if (existing.quantity <= 1) return prev.filter(c => c.menuItem.id !== itemId)
-      return prev.map(c => c.menuItem.id === itemId ? { ...c, quantity: c.quantity - 1 } : c)
-    })
-  }
+    if (!sess) return
 
-  const cartTotal = cart.reduce((sum, c) => sum + c.menuItem.price * c.quantity, 0)
-  const cartCount = cart.reduce((sum, c) => sum + c.quantity, 0)
+    setSessionStatus(sess.status)
 
-  async function submitOrderAndPay() {
-    if (!order || !cart.length) return
-    setSubmitting(true)
-    const res = await fetch('/api/orders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        order_id: order.id,
-        items: cart.map(c => ({
-          menu_item_id: c.menuItem.id,
-          quantity: c.quantity,
-          price_snapshot: c.menuItem.price,
-          note: c.note,
-        })),
-      }),
-    })
-    const data = await res.json()
-    if (data.success) {
-      setPaymentAmount(cartTotal)
-      setShowCart(false)
-      setShowPayment(true)
+    type Row = {
+      status: string
+      orders: Array<{
+        status: string
+        created_at: string
+        order_items: Array<{
+          quantity: number
+          price_snapshot: number
+          options_snapshot: Array<{ group_name: string; option_name: string; price_delta: number; quantity?: number }> | null
+          menu_items: Record<string, string> | null
+        }>
+      }>
     }
-    setSubmitting(false)
-  }
+    const s = sess as unknown as Row
 
-  function onPaymentSuccess() {
-    setCart([])
-    setShowPayment(false)
-  }
+    const list: SubmittedItem[] = []
+    let total = 0
+    for (const o of s.orders ?? []) {
+      if (o.status === 'cancelled') continue
+      for (const it of o.order_items ?? []) {
+        const name = getMenuName(it.menu_items as unknown as Record<string, unknown>, locale)
+        const optDelta = (it.options_snapshot ?? []).reduce(
+          (s2, op) => s2 + Number(op.price_delta) * (op.quantity ?? 1),
+          0
+        )
+        const unitPrice = Number(it.price_snapshot) + optDelta
+        const subtotal = unitPrice * it.quantity
+        total += subtotal
 
+        list.push({
+          name,
+          qty: it.quantity,
+          subtotal,
+          options: (it.options_snapshot ?? []).map(op => {
+            const qty = op.quantity ?? 1
+            const priceText = op.price_delta !== 0
+              ? ` (${op.price_delta > 0 ? '+' : ''}฿${(Number(op.price_delta) * qty).toFixed(0)})`
+              : ''
+            return qty > 1
+              ? `${qty}x ${op.option_name}${priceText}`
+              : `${op.option_name}${priceText}`
+          }),
+          createdAt: o.created_at,
+        })
+      }
+    }
+
+    setSubmittedItems(list)
+    setBillTotal(total)
+
+    if (s.status === 'closed') {
+      setPaidAmount(total)
+      setSessionClosed(true)
+      setShowCart(false)
+      setShowBill(false)
+      setShowPayment(false)
+      setShowSuccess(false)
+      setCart([])
+    }
+  }, [session?.id, supabase, locale])
+
+  useEffect(() => {
+    if (!session?.id) return
+    refreshBill()
+    const channel = supabase
+      .channel(`customer-session-${session.id}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'table_sessions', filter: `id=eq.${session.id}` }, () => refreshBill())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, () => refreshBill())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => refreshBill())
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [session?.id, refreshBill, supabase])
+
+  // ─── Helpers ───
   const t = (th: string, en: string, zh: string, ja: string, ko: string) => {
     const map: Record<Locale, string> = { th, en, zh, ja, ko }
     return map[locale] || th
   }
 
+  function getName(obj: Record<string, unknown> | null | undefined): string {
+    if (!obj) return ''
+    return getMenuName(obj, locale)
+  }
+
+  // ─── Add to cart (called from option picker) ───
+  function addToCart(menuItem: MenuItem, selectedOptions: SelectedOption[], note: string) {
+    const optDelta = selectedOptions.reduce((s, o) => s + o.price_delta * o.quantity, 0)
+    const unitPrice = menuItem.price + optDelta
+    setCart(prev => [...prev, {
+      cartId: crypto.randomUUID(),
+      menuItem,
+      quantity: 1,
+      selectedOptions,
+      note,
+      unitPrice,
+    }])
+    setPickingItem(null)
+    setStep('items')
+  }
+
+  function updateCartQty(cartId: string, delta: number) {
+    setCart(prev => prev
+      .map(c => c.cartId === cartId ? { ...c, quantity: c.quantity + delta } : c)
+      .filter(c => c.quantity > 0)
+    )
+  }
+
+  function removeCart(cartId: string) {
+    setCart(prev => prev.filter(c => c.cartId !== cartId))
+  }
+
+  // For items WITHOUT options - quick add (no picker)
+  function quickAddItem(item: MenuItem) {
+    const groups = optionGroupsByItem[item.id] ?? []
+    if (groups.length > 0) {
+      // Has options → open picker
+      setPickingItem(item)
+      setStep('option_picker')
+    } else {
+      // No options → add directly
+      addToCart(item, [], '')
+    }
+  }
+
+  const cartCount = cart.reduce((s, c) => s + c.quantity, 0)
+  const cartTotal = cart.reduce((s, c) => s + c.unitPrice * c.quantity, 0)
+
+  // ─── Submit cart to kitchen ───
+  async function submitToKitchen() {
+    if (!order || !cart.length) return
+    setSubmitting(true)
+    const items = cart.map(c => ({
+      menu_item_id: c.menuItem.id,
+      quantity: c.quantity,
+      price_snapshot: c.menuItem.price,  // base price; options stored separately
+      note: c.note || null,
+      options_snapshot: c.selectedOptions.map(o => ({
+        group_id: o.group_id,
+        group_name: o.group_name,
+        option_id: o.option_id,
+        option_name: o.option_name,
+        price_delta: o.price_delta,
+        quantity: o.quantity,
+      })),
+    }))
+
+    const res = await fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: order.id, items }),
+    })
+    const data = await res.json()
+    setSubmitting(false)
+    if (data.success) {
+      setCart([])
+      setShowCart(false)
+      setShowSuccess(true)
+      refreshBill()
+    } else {
+      alert(t('ส่งครัวไม่สำเร็จ', 'Failed to send', '发送失败', '送信失敗', '전송 실패'))
+    }
+  }
+
+  async function requestBill() {
+    if (!session?.id) return
+    setRequestingBill(true)
+    const res = await fetch('/api/cashier/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: session.id }),
+    })
+    setRequestingBill(false)
+    if (!res.ok) {
+      const json = await res.json()
+      alert(json.error)
+      return
+    }
+    setShowBill(false)
+    refreshBill()
+  }
+
+  async function cancelBillRequest() {
+    if (!session?.id) return
+    setRequestingBill(true)
+    await fetch(`/api/cashier/request?session_id=${session.id}`, { method: 'DELETE' })
+    setRequestingBill(false)
+    refreshBill()
+  }
+
+  // ─── Loading ───
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="text-center">
@@ -146,17 +421,54 @@ export default function CustomerMenuPage({
     </div>
   )
 
-  return (
-    <div className="min-h-screen bg-gray-50 pb-24">
-      <div className="sticky top-0 z-30 bg-white border-b border-gray-200 shadow-sm">
-        <div className="flex items-center justify-between px-4 py-3">
-          <p className="font-semibold text-gray-900 text-sm">
-            {table?.label || `${t('โต๊ะ', 'Table', '桌', 'テーブル', '테이블')} ${table?.table_number}`}
-          </p>
-          <div className="relative">
+  // ─── Session closed (paid) ───
+  if (sessionClosed) {
+    return <ThankYouScreen paidAmount={paidAmount} table={table} t={t} />
+  }
+
+  const isPaying = sessionStatus === 'paying'
+  const activeCategory = categories.find(c => c.id === activeCategoryId)
+  const categoryItems = items.filter(it => it.category_id === activeCategoryId)
+
+  // ─── STEP 3: Option Picker (full-screen) ───
+  if (step === 'option_picker' && pickingItem) {
+    return (
+      <OptionPicker
+        menuItem={pickingItem}
+        groups={optionGroupsByItem[pickingItem.id] ?? []}
+        locale={locale}
+        t={t}
+        onCancel={() => { setPickingItem(null); setStep('items') }}
+        onConfirm={(selectedOptions, note) => addToCart(pickingItem, selectedOptions, note)}
+      />
+    )
+  }
+
+  // ─── Header (shared between steps 1 & 2) ───
+  const Header = (
+    <div className="sticky top-0 z-30 bg-white border-b border-gray-200 shadow-sm">
+      <div className="px-4 py-3">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {step === 'items' && (
+              <button
+                onClick={() => { setStep('categories'); setActiveCategoryId(null) }}
+                className="p-1.5 -ml-1.5 rounded-full hover:bg-gray-100"
+              >
+                <ArrowLeft size={20} className="text-green-700" />
+              </button>
+            )}
+            <div className="min-w-0">
+              <h1 className="font-bold text-green-700 text-lg truncate">
+                {restaurantName || 'QR Order'}
+              </h1>
+            </div>
+          </div>
+
+          <div className="relative flex-shrink-0">
             <button
               onClick={() => setShowLangPicker(!showLangPicker)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 text-xs text-gray-600 hover:bg-gray-50"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-green-600 text-green-700 text-xs font-medium hover:bg-green-50"
             >
               <Globe size={14} />
               {localeNames[locale].split(' ')[1]}
@@ -167,7 +479,7 @@ export default function CustomerMenuPage({
                   <button
                     key={key}
                     onClick={() => { setLocale(key); setShowLangPicker(false) }}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${locale === key ? 'bg-orange-50 text-orange-600 font-medium' : 'hover:bg-gray-50 text-gray-700'}`}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${locale === key ? 'bg-green-50 text-green-700 font-medium' : 'hover:bg-gray-50 text-gray-700'}`}
                   >
                     {label}
                   </button>
@@ -177,145 +489,696 @@ export default function CustomerMenuPage({
           </div>
         </div>
 
-        <div className="flex gap-1 px-4 pb-3 overflow-x-auto">
-          {categories.map(cat => (
-            <button
-              key={cat.id}
-              onClick={() => setActiveCategory(cat.id)}
-              className={`flex-shrink-0 px-4 py-1.5 rounded-full text-xs font-medium transition-colors ${activeCategory === cat.id ? 'bg-orange-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-            >
-              {getCategoryName(cat as unknown as Record<string, unknown>, locale)}
-            </button>
-          ))}
+        <div className="flex items-center justify-between text-xs">
+          <div>
+            <span className="text-gray-500">{step === 'items' && activeCategory ? getCategoryName(activeCategory as unknown as Record<string, unknown>, locale) : t('หมวดหมู่', 'Categories', '分类', 'カテゴリー', '카테고리')}</span>
+          </div>
+          <div className="text-right">
+            <p className="font-semibold text-gray-900">
+              {t('โต๊ะที่', 'Table', '桌台', 'テーブル', '테이블')} : {table?.table_number ?? '?'}
+            </p>
+            {table?.label && <p className="text-gray-500 text-[10px]">{table.label}</p>}
+          </div>
         </div>
       </div>
 
-      <div className="px-4 py-4 space-y-3">
-        {items
-          .filter(item => item.category_id === activeCategory)
-          .map(item => {
-            const qty = cart.find(c => c.menuItem.id === item.id)?.quantity || 0
+      {/* Bill request banner */}
+      {isPaying && (
+        <div className="mx-4 mb-3 p-3 bg-orange-50 border-2 border-orange-300 rounded-xl">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 border-3 border-orange-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+            <p className="flex-1 text-xs font-bold text-orange-700">
+              {t('เรียกแคชเชียร์แล้ว · กรุณาแจ้งเลขโต๊ะ', 'Cashier called · Tell table number', '已通知收银 · 请告知桌号', '会計係に通知済', '계산원 호출됨')}
+            </p>
+            <button onClick={cancelBillRequest} disabled={requestingBill} className="text-xs text-gray-600 underline">
+              {t('ยกเลิก', 'Cancel', '取消', 'キャンセル', '취소')}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+
+  // ─── STEP 1: Categories Grid ───
+  if (step === 'categories') {
+    return (
+      <div className="min-h-screen bg-gray-50 pb-28">
+        {Header}
+
+        <div className="px-4 py-4 grid grid-cols-2 gap-3">
+          {categories.map(cat => {
+            const catItemsCount = items.filter(it => it.category_id === cat.id).length
+            const firstItem = items.find(it => it.category_id === cat.id && it.image_url)
+            const previewImg = firstItem?.image_url
             return (
-              <div key={item.id} className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm">
-                <div className="flex gap-3 p-3">
-                  <div className="w-24 h-24 rounded-xl bg-gray-100 overflow-hidden flex-shrink-0">
-                    {item.image_url
-                      ? <img src={item.image_url} alt={item.name_th} className="w-full h-full object-cover" />
-                      : <div className="w-full h-full flex items-center justify-center text-3xl">🍽️</div>
-                    }
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-semibold text-gray-900 text-sm leading-tight">
+              <button
+                key={cat.id}
+                onClick={() => { setActiveCategoryId(cat.id); setStep('items') }}
+                className="bg-white rounded-2xl border-2 border-gray-200 overflow-hidden hover:border-green-400 active:scale-95 transition-all text-left"
+              >
+                <div className="aspect-[4/3] bg-gradient-to-br from-green-50 to-green-100 relative">
+                  {previewImg ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={previewImg} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-5xl">🍽️</div>
+                  )}
+                </div>
+                <div className="p-3">
+                  <p className="font-bold text-gray-900 leading-tight">
+                    {getCategoryName(cat as unknown as Record<string, unknown>, locale)}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {catItemsCount} {t('รายการ', 'items', '项', '品', '개')}
+                  </p>
+                </div>
+              </button>
+            )
+          })}
+        </div>
+
+        {categories.length === 0 && (
+          <p className="text-center text-gray-400 py-12 text-sm">
+            {t('ยังไม่มีเมนู', 'No menu yet', '暂无菜单', 'メニューがありません', '메뉴 없음')}
+          </p>
+        )}
+
+        <FloatingButtons
+          cartCount={cartCount}
+          cartTotal={cartTotal}
+          billTotal={billTotal}
+          onShowCart={() => setShowCart(true)}
+          onShowBill={() => setShowBill(true)}
+          t={t}
+        />
+
+        {/* Cart / Bill drawers */}
+        {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={submitToKitchen} submitting={submitting} />}
+        {showBill && <BillDrawer table={table} submittedItems={submittedItems} billTotal={billTotal} isPaying={isPaying} requestingBill={requestingBill} t={t} onClose={() => setShowBill(false)} onRequestBill={requestBill} onCancelRequest={cancelBillRequest} onPayQr={() => { setShowBill(false); setShowPayment(true) }} />}
+        {showSuccess && <SuccessOverlay t={t} onShowBill={() => { setShowSuccess(false); setShowBill(true) }} onContinue={() => setShowSuccess(false)} />}
+        {showPayment && session && (
+          <PaymentModal sessionId={session.id} amount={billTotal} onClose={() => setShowPayment(false)} onPaid={() => { setShowPayment(false); refreshBill() }} />
+        )}
+      </div>
+    )
+  }
+
+  // ─── STEP 2: Items in Category ───
+  return (
+    <div className="min-h-screen bg-gray-50 pb-28">
+      {Header}
+
+      <div className="px-4 py-4 mb-2">
+        <p className="font-bold text-gray-900">
+          {activeCategory ? getCategoryName(activeCategory as unknown as Record<string, unknown>, locale) : ''}
+        </p>
+      </div>
+
+      <div className="px-4 space-y-3">
+        {categoryItems.map(item => {
+          const hasOptions = (optionGroupsByItem[item.id] ?? []).length > 0
+          const inCart = cart.filter(c => c.menuItem.id === item.id).reduce((s, c) => s + c.quantity, 0)
+          return (
+            <button
+              key={item.id}
+              onClick={() => quickAddItem(item)}
+              className="w-full bg-white rounded-2xl border-2 border-gray-200 overflow-hidden hover:border-green-400 active:scale-[0.99] transition-all text-left"
+            >
+              <div className="flex">
+                <div className="w-32 h-32 bg-gradient-to-br from-green-50 to-green-100 flex-shrink-0">
+                  {item.image_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={item.image_url} alt={item.name_th} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-4xl">🍽️</div>
+                  )}
+                </div>
+                <div className="flex-1 p-3 flex flex-col justify-between min-w-0">
+                  <div>
+                    <p className="font-bold text-gray-900 leading-tight">
                       {getMenuName(item as unknown as Record<string, unknown>, locale)}
                     </p>
                     {item.spicy_level > 0 && (
-                      <span className="text-xs text-red-500">{'🌶️'.repeat(item.spicy_level)}</span>
-                    )}
-                    {item.allergens?.length > 0 && (
-                      <p className="text-xs text-amber-600 mt-0.5">⚠️ {item.allergens.join(', ')}</p>
+                      <p className="text-xs mt-0.5">{'🌶️'.repeat(item.spicy_level)}</p>
                     )}
                     {getMenuDesc(item as unknown as Record<string, unknown>, locale) && (
-                      <p className="text-xs text-gray-400 mt-1 line-clamp-2">
+                      <p className="text-xs text-gray-500 mt-1 line-clamp-2">
                         {getMenuDesc(item as unknown as Record<string, unknown>, locale)}
                       </p>
                     )}
-                    <div className="flex items-center justify-between mt-2">
-                      <p className="font-bold text-orange-500">฿{item.price.toLocaleString()}</p>
-                      {qty === 0 ? (
-                        <button
-                          onClick={() => addToCart(item)}
-                          className="bg-orange-500 hover:bg-orange-600 text-white text-xs font-semibold px-4 py-1.5 rounded-full transition-colors"
-                        >
-                          {t('เพิ่ม', 'Add', '添加', '追加', '추가')}
-                        </button>
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <button onClick={() => removeFromCart(item.id)} className="w-7 h-7 rounded-full bg-orange-100 flex items-center justify-center text-orange-600">
-                            <Minus size={14} />
-                          </button>
-                          <span className="font-semibold text-sm w-4 text-center">{qty}</span>
-                          <button onClick={() => addToCart(item)} className="w-7 h-7 rounded-full bg-orange-500 flex items-center justify-center text-white">
-                            <Plus size={14} />
-                          </button>
-                        </div>
+                  </div>
+                  <div className="flex items-center justify-end mt-2">
+                    <div className="bg-green-700 hover:bg-green-800 text-white font-bold px-4 py-2 rounded-full text-sm flex items-center gap-2">
+                      ฿{item.price.toLocaleString()}
+                      {hasOptions ? <ChevronRight size={16} /> : <Plus size={16} />}
+                      {inCart > 0 && (
+                        <span className="bg-white text-green-700 text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">
+                          {inCart}
+                        </span>
                       )}
                     </div>
                   </div>
                 </div>
               </div>
-            )
-          })}
+            </button>
+          )
+        })}
+
+        {categoryItems.length === 0 && (
+          <p className="text-center text-gray-400 py-12 text-sm">
+            {t('ยังไม่มีเมนูในหมวดนี้', 'No items', '暂无项目', '商品なし', '항목 없음')}
+          </p>
+        )}
       </div>
 
-      {cartCount > 0 && (
-        <div className="fixed bottom-6 left-4 right-4 z-40">
-          <button
-            onClick={() => setShowCart(true)}
-            className="w-full bg-orange-500 hover:bg-orange-600 text-white rounded-2xl py-4 px-5 flex items-center justify-between shadow-lg transition-colors"
-          >
-            <span className="bg-orange-600 text-white text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center">{cartCount}</span>
-            <span className="font-semibold">{t('ดูตะกร้า', 'View Cart', '查看购物车', 'カートを見る', '장바구니 보기')}</span>
-            <span className="font-bold">฿{cartTotal.toLocaleString()}</span>
-          </button>
-        </div>
-      )}
+      <FloatingButtons cartCount={cartCount} cartTotal={cartTotal} billTotal={billTotal} onShowCart={() => setShowCart(true)} onShowBill={() => setShowBill(true)} t={t} />
 
-      {showCart && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setShowCart(false)} />
-          <div className="relative bg-white rounded-t-3xl max-h-[85vh] flex flex-col">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <h2 className="font-bold text-gray-900">{t('ตะกร้าของฉัน', 'My Cart', '我的购物车', 'マイカート', '내 장바구니')}</h2>
-              <button onClick={() => setShowCart(false)} className="p-1 hover:bg-gray-100 rounded-lg"><X size={20} /></button>
-            </div>
-            <div className="overflow-y-auto flex-1 px-5 py-3 space-y-3">
-              {cart.map(c => (
-                <div key={c.menuItem.id} className="flex items-center gap-3">
-                  <div className="flex-1">
-                    <p className="font-medium text-sm text-gray-900">{getMenuName(c.menuItem as unknown as Record<string, unknown>, locale)}</p>
-                    <p className="text-xs text-orange-500 font-semibold">฿{(c.menuItem.price * c.quantity).toLocaleString()}</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => removeFromCart(c.menuItem.id)} className="w-7 h-7 rounded-full bg-gray-100 flex items-center justify-center text-gray-600">
-                      <Minus size={13} />
-                    </button>
-                    <span className="font-semibold text-sm w-4 text-center">{c.quantity}</span>
-                    <button onClick={() => addToCart(c.menuItem)} className="w-7 h-7 rounded-full bg-orange-500 flex items-center justify-center text-white">
-                      <Plus size={13} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="px-5 py-4 border-t border-gray-100">
-              <div className="flex justify-between mb-4">
-                <span className="text-gray-500">{t('ยอดรวม', 'Total', '总计', '合計', '합계')}</span>
-                <span className="font-bold text-lg text-gray-900">฿{cartTotal.toLocaleString()}</span>
-              </div>
-              <button
-                onClick={submitOrderAndPay}
-                disabled={submitting}
-                className="w-full bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 text-white font-bold py-4 rounded-2xl transition-colors"
-              >
-                {submitting
-                  ? t('กำลังส่ง...', 'Sending...', '发送中...', '送信中...', '전송 중...')
-                  : t('สั่งและชำระเงิน', 'Order & Pay', '下单付款', '注文と支払い', '주문 및 결제')}
-              </button>
-            </div>
+      {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={submitToKitchen} submitting={submitting} />}
+      {showBill && <BillDrawer table={table} submittedItems={submittedItems} billTotal={billTotal} isPaying={isPaying} requestingBill={requestingBill} t={t} onClose={() => setShowBill(false)} onRequestBill={requestBill} onCancelRequest={cancelBillRequest} onPayQr={() => { setShowBill(false); setShowPayment(true) }} />}
+      {showSuccess && <SuccessOverlay t={t} onShowBill={() => { setShowSuccess(false); setShowBill(true) }} onContinue={() => setShowSuccess(false)} />}
+      {showPayment && session && (
+        <PaymentModal sessionId={session.id} amount={billTotal} onClose={() => setShowPayment(false)} onPaid={() => { setShowPayment(false); refreshBill() }} />
+      )}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════
+// SUB-COMPONENTS
+// ═══════════════════════════════════════════════════
+
+function FloatingButtons({ cartCount, cartTotal, billTotal, onShowCart, onShowBill, t }: {
+  cartCount: number; cartTotal: number; billTotal: number
+  onShowCart: () => void; onShowBill: () => void
+  t: (th: string, en: string, zh: string, ja: string, ko: string) => string
+}) {
+  if (cartCount === 0 && billTotal === 0) return null
+  return (
+    <div className="fixed bottom-4 left-4 right-4 z-40">
+      {cartCount > 0 ? (
+        <button
+          onClick={onShowCart}
+          className="w-full bg-green-700 hover:bg-green-800 text-white rounded-full py-3.5 px-5 flex items-center justify-between shadow-lg"
+        >
+          <span className="flex items-center gap-2">
+            <ShoppingCart size={20} />
+            <span className="bg-white text-green-700 text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center">
+              {cartCount}
+            </span>
+          </span>
+          <span className="font-bold">{t('ดูตะกร้า', 'View Cart', '查看购物车', 'カート', '장바구니')}</span>
+          <span className="font-bold">฿{cartTotal.toLocaleString()}</span>
+        </button>
+      ) : (
+        <button
+          onClick={onShowBill}
+          className="w-full bg-white border-2 border-green-700 text-green-700 rounded-full py-3 px-5 flex items-center justify-between shadow-md hover:bg-green-50"
+        >
+          <span className="text-sm font-medium">{t('บิลทั้งโต๊ะ', 'Table Bill', '本桌账单', 'テーブル合計', '테이블 청구')}</span>
+          <span className="font-bold">฿{billTotal.toLocaleString()}</span>
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ─── Option Picker (full-screen) ───
+function OptionPicker({
+  menuItem,
+  groups,
+  locale,
+  t,
+  onCancel,
+  onConfirm,
+}: {
+  menuItem: MenuItem
+  groups: OptionGroup[]
+  locale: Locale
+  t: (th: string, en: string, zh: string, ja: string, ko: string) => string
+  onCancel: () => void
+  onConfirm: (opts: SelectedOption[], note: string) => void
+}) {
+  // selections[group_id] = { [option_id]: quantity }
+  const [selections, setSelections] = useState<Record<string, Record<string, number>>>({})
+  const [note, setNote] = useState('')
+
+  function getName(obj: Record<string, unknown> | null | undefined): string {
+    if (!obj) return ''
+    return getMenuName(obj, locale)
+  }
+
+  function getOptQty(groupId: string, optionId: string): number {
+    return selections[groupId]?.[optionId] ?? 0
+  }
+
+  function setSingleSelect(group: OptionGroup, optionId: string) {
+    setSelections(prev => ({ ...prev, [group.id]: { [optionId]: 1 } }))
+  }
+
+  function changeMultiQty(groupId: string, optionId: string, delta: number) {
+    setSelections(prev => {
+      const cur = prev[groupId] ?? {}
+      const next = (cur[optionId] ?? 0) + delta
+      if (next <= 0) {
+        // remove
+        const { [optionId]: _, ...rest } = cur
+        void _
+        return { ...prev, [groupId]: rest }
+      }
+      return { ...prev, [groupId]: { ...cur, [optionId]: next } }
+    })
+  }
+
+  // Validate required
+  function canConfirm(): boolean {
+    for (const g of groups) {
+      if (g.is_required) {
+        const sel = selections[g.id]
+        if (!sel || Object.keys(sel).length === 0) return false
+      }
+    }
+    return true
+  }
+
+  // Compute total
+  let optDelta = 0
+  for (const g of groups) {
+    const sel = selections[g.id] ?? {}
+    for (const [optId, qty] of Object.entries(sel)) {
+      const opt = g.option_group_items.find(i => i.id === optId)
+      if (opt) optDelta += Number(opt.price_delta) * qty
+    }
+  }
+  const totalPrice = menuItem.price + optDelta
+
+  function confirm() {
+    const out: SelectedOption[] = []
+    for (const g of groups) {
+      const sel = selections[g.id] ?? {}
+      for (const [optId, qty] of Object.entries(sel)) {
+        const opt = g.option_group_items.find(i => i.id === optId)
+        if (!opt) continue
+        out.push({
+          group_id: g.id,
+          group_name: getName(g as unknown as Record<string, unknown>),
+          option_id: optId,
+          option_name: getName(opt as unknown as Record<string, unknown>),
+          price_delta: Number(opt.price_delta),
+          quantity: qty,
+        })
+      }
+    }
+    onConfirm(out, note)
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 pb-28">
+      <div className="sticky top-0 z-30 bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-3">
+        <button onClick={onCancel} className="p-1.5 -ml-1.5 rounded-full hover:bg-gray-100">
+          <ArrowLeft size={20} className="text-green-700" />
+        </button>
+        <h1 className="font-bold text-gray-900 flex-1 truncate">
+          {getMenuName(menuItem as unknown as Record<string, unknown>, locale)}
+        </h1>
+        <span className="font-bold text-green-700">฿{menuItem.price.toLocaleString()}</span>
+      </div>
+
+      {/* Hero image */}
+      {menuItem.image_url && (
+        <div className="px-4 pt-4">
+          <div className="w-32 h-32 mx-auto rounded-2xl overflow-hidden bg-gray-100">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={menuItem.image_url} alt="" className="w-full h-full object-cover" />
           </div>
         </div>
       )}
 
-      {showPayment && session && order && (
-        <PaymentModal
-          sessionId={session.id}
-          orderId={order.id}
-          amount={paymentAmount}
-          locale={locale}
-          onClose={() => setShowPayment(false)}
-          onSuccess={onPaymentSuccess}
-        />
-      )}
+      <div className="px-4 py-4 space-y-5">
+        {groups.map(group => {
+          const groupName = getName(group as unknown as Record<string, unknown>)
+          return (
+            <div key={group.id}>
+              <div className="mb-3">
+                <h2 className="font-bold text-gray-900">
+                  {groupName}
+                  {group.is_required && <span className="text-red-500 ml-1">*</span>}
+                </h2>
+                {group.selection_type === 'multi' && (
+                  <p className="text-xs text-gray-500">
+                    {t('เลือกได้หลายอย่าง', 'Choose multiple', '可多选', '複数選択可', '여러 선택 가능')}
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                {group.option_group_items.map(opt => {
+                  const optName = getName(opt as unknown as Record<string, unknown>)
+                  const qty = getOptQty(group.id, opt.id)
+                  const selected = qty > 0
+
+                  return (
+                    <div
+                      key={opt.id}
+                      className={`flex items-center gap-3 p-2 bg-white rounded-xl border-2 transition-colors ${selected ? 'border-green-500' : 'border-gray-200'}`}
+                    >
+                      {/* Image */}
+                      <div className="w-14 h-14 rounded-lg bg-gray-100 overflow-hidden flex-shrink-0">
+                        {opt.image_url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={opt.image_url} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-2xl">🍽️</div>
+                        )}
+                      </div>
+
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-gray-900 text-sm">{optName}</p>
+                        {Number(opt.price_delta) !== 0 && (
+                          <p className="text-xs text-green-700 font-semibold">
+                            {Number(opt.price_delta) > 0 ? '+' : ''}฿{opt.price_delta}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Selector */}
+                      {group.selection_type === 'single' ? (
+                        <button
+                          onClick={() => setSingleSelect(group, opt.id)}
+                          className={`w-7 h-7 rounded-full border-2 flex items-center justify-center ${selected ? 'border-green-600 bg-green-600' : 'border-gray-300'}`}
+                        >
+                          {selected && <div className="w-3 h-3 rounded-full bg-white" />}
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => changeMultiQty(group.id, opt.id, -1)}
+                            disabled={qty === 0}
+                            className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center disabled:opacity-40"
+                          >
+                            <Minus size={14} />
+                          </button>
+                          <span className="font-semibold text-sm w-4 text-center">{qty}</span>
+                          <button
+                            onClick={() => changeMultiQty(group.id, opt.id, 1)}
+                            className="w-8 h-8 rounded-full bg-green-700 text-white flex items-center justify-center"
+                          >
+                            <Plus size={14} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        })}
+
+        {/* Special request */}
+        <div>
+          <h2 className="font-bold text-gray-900 mb-2">
+            {t('ความต้องการพิเศษเพิ่มเติม', 'Special requests', '特殊要求', '特別なご要望', '특별 요청')}
+          </h2>
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder={t('เช่น ไม่ใส่ผัก, เผ็ดน้อย', 'e.g. no veggies, mild', '例:不要蔬菜', '例: 野菜なし', '예: 채소 빼고')}
+            rows={3}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 placeholder-gray-400 resize-none"
+          />
+        </div>
+      </div>
+
+      {/* Bottom action */}
+      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 px-4 py-3 flex gap-2">
+        <button
+          onClick={onCancel}
+          className="px-5 py-3 rounded-full border-2 border-green-700 text-green-700 font-semibold"
+        >
+          {t('ยกเลิก', 'Cancel', '取消', 'キャンセル', '취소')}
+        </button>
+        <button
+          onClick={confirm}
+          disabled={!canConfirm()}
+          className="flex-1 py-3 rounded-full bg-green-700 hover:bg-green-800 disabled:bg-gray-300 text-white font-bold"
+        >
+          {t('เพิ่มเข้าตะกร้า', 'Add to Cart', '加入购物车', 'カートに追加', '장바구니에 추가')} · ฿{totalPrice.toLocaleString()}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Cart Drawer ───
+function CartDrawer({
+  cart, cartTotal, locale, t,
+  onClose, onUpdateQty, onRemove, onContinue, onSubmit, submitting,
+}: {
+  cart: CartItem[]; cartTotal: number; locale: Locale
+  t: (th: string, en: string, zh: string, ja: string, ko: string) => string
+  onClose: () => void
+  onUpdateQty: (id: string, delta: number) => void
+  onRemove: (id: string) => void
+  onContinue: () => void
+  onSubmit: () => void
+  submitting: boolean
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative bg-white rounded-t-3xl max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <h2 className="font-bold text-gray-900">{t('รายการอาหารในตะกร้าของฉัน', 'My Cart', '我的购物车', 'マイカート', '내 장바구니')}</h2>
+          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-lg"><X size={20} /></button>
+        </div>
+        <div className="overflow-y-auto flex-1 px-5 py-3 space-y-3">
+          {cart.length === 0 ? (
+            <p className="text-center text-gray-400 py-8 text-sm">{t('ตะกร้าว่างเปล่า', 'Cart is empty', '购物车为空', 'カートは空', '장바구니 비어 있음')}</p>
+          ) : cart.map(c => (
+            <div key={c.cartId} className="border border-gray-100 rounded-xl p-3">
+              <div className="flex items-start gap-3">
+                <span className="font-bold text-green-700 text-sm">{c.quantity}x</span>
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-gray-900 text-sm">
+                    {getMenuName(c.menuItem as unknown as Record<string, unknown>, locale)}
+                  </p>
+                  {c.selectedOptions.map((o, i) => (
+                    <p key={i} className="text-xs text-gray-600 mt-1">
+                      - {o.quantity > 1 ? `${o.quantity}x ` : ''}{o.option_name}
+                      {o.price_delta !== 0 && ` (${o.price_delta > 0 ? '+' : ''}฿${o.price_delta * o.quantity})`}
+                    </p>
+                  ))}
+                  {c.note && <p className="text-xs text-orange-600 mt-1">📝 {c.note}</p>}
+                </div>
+                <div className="text-right">
+                  <p className="font-bold text-green-700 text-sm">฿{(c.unitPrice * c.quantity).toLocaleString()}</p>
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-3 mt-2">
+                <button onClick={() => onRemove(c.cartId)} className="text-xs text-red-600">{t('ลบ', 'Remove', '删除', '削除', '삭제')}</button>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => onUpdateQty(c.cartId, -1)} className="w-7 h-7 rounded-full bg-gray-100 flex items-center justify-center">
+                    <Minus size={14} />
+                  </button>
+                  <span className="font-semibold text-sm w-4 text-center">{c.quantity}</span>
+                  <button onClick={() => onUpdateQty(c.cartId, 1)} className="w-7 h-7 rounded-full bg-green-700 text-white flex items-center justify-center">
+                    <Plus size={14} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="px-5 py-4 border-t border-gray-100">
+          <div className="flex justify-between mb-3">
+            <span className="text-gray-700 font-medium">Total</span>
+            <span className="font-bold text-xl text-green-700">฿{cartTotal.toLocaleString()}</span>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={onContinue} className="flex-1 py-3 rounded-full border-2 border-green-700 text-green-700 font-semibold text-sm">
+              {t('สั่งอาหารเพิ่ม', 'Add more', '继续点餐', '追加注文', '추가 주문')}
+            </button>
+            <button
+              onClick={onSubmit}
+              disabled={submitting || cart.length === 0}
+              className="flex-1 py-3 rounded-full bg-green-700 hover:bg-green-800 disabled:bg-gray-300 text-white font-bold text-sm"
+            >
+              {submitting
+                ? t('กำลังส่ง...', 'Sending...', '发送中...', '送信中...', '전송 중...')
+                : t('ส่งรายการอาหาร', 'Send Order', '提交订单', '注文送信', '주문 전송')}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Bill Drawer (table-wide bill, all submitted) ───
+function BillDrawer({
+  table, submittedItems, billTotal, isPaying, requestingBill, t,
+  onClose, onRequestBill, onCancelRequest, onPayQr,
+}: {
+  table: { table_number: number; label: string | null } | null
+  submittedItems: SubmittedItem[]
+  billTotal: number
+  isPaying: boolean
+  requestingBill: boolean
+  t: (th: string, en: string, zh: string, ja: string, ko: string) => string
+  onClose: () => void
+  onRequestBill: () => void
+  onCancelRequest: () => void
+  onPayQr: () => void
+}) {
+  function timeStr(iso: string) {
+    const d = new Date(iso)
+    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative bg-white rounded-t-3xl max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <h2 className="font-bold text-gray-900">
+            {t('รายการอาหารที่สั่งจากเว็บ', 'Items Ordered', '已订菜品', '注文済', '주문 내역')}
+          </h2>
+          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-lg"><X size={20} /></button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 px-5 py-3 space-y-3">
+          {submittedItems.length === 0 ? (
+            <p className="text-center text-gray-400 py-8 text-sm">{t('ยังไม่มีรายการ', 'No items yet', '暂无项目', 'まだ注文がありません', '아직 없음')}</p>
+          ) : submittedItems.map((it, idx) => (
+            <div key={idx} className="border border-gray-100 rounded-xl p-3">
+              <div className="flex items-start gap-3">
+                <span className="font-bold text-green-700 text-sm">{it.qty}x</span>
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-gray-900 text-sm">{it.name}</p>
+                  {it.options.map((opt, i) => (
+                    <p key={i} className="text-xs text-gray-600 mt-0.5">- {opt}</p>
+                  ))}
+                </div>
+                <div className="text-right">
+                  <p className="font-bold text-green-700 text-sm">฿ {it.subtotal.toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-0.5">🕒 {timeStr(it.createdAt)}</p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="px-5 py-4 border-t border-gray-100 space-y-3">
+          <div className="flex justify-between">
+            <span className="text-gray-700 font-medium">Total</span>
+            <span className="font-bold text-xl text-green-700">฿{billTotal.toLocaleString()}</span>
+          </div>
+
+          {!isPaying && billTotal > 0 && (
+            <>
+              <button
+                onClick={onRequestBill}
+                disabled={requestingBill}
+                className="w-full py-3 rounded-full bg-green-700 hover:bg-green-800 disabled:bg-gray-300 text-white font-bold"
+              >
+                {requestingBill
+                  ? t('กำลังเรียก...', 'Calling...', '呼叫中...', '呼出中...', '호출 중...')
+                  : t('💰 ขอจ่ายเงิน (ที่แคชเชียร์)', '💰 Request Bill (Cashier)', '💰 请求账单（收银台）', '💰 会計をお願い', '💰 계산 요청')}
+              </button>
+              <button
+                onClick={onPayQr}
+                className="w-full py-2.5 rounded-full border border-gray-300 text-gray-700 font-medium text-sm"
+              >
+                {t('📱 จ่ายด้วย QR ที่โต๊ะ', '📱 Pay by QR at table', '📱 桌台扫码支付', '📱 QR決済', '📱 QR 결제')}
+              </button>
+            </>
+          )}
+
+          {isPaying && (
+            <button
+              onClick={onCancelRequest}
+              disabled={requestingBill}
+              className="w-full py-3 rounded-full border border-gray-300 text-gray-700 font-medium"
+            >
+              {t('ยกเลิกการขอจ่าย (สั่งเพิ่ม)', 'Cancel Request (Order More)', '取消请求（继续点餐）', 'キャンセル（追加注文）', '취소 (추가 주문)')}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Success overlay (after sending order to kitchen) ───
+function SuccessOverlay({ t, onShowBill, onContinue }: {
+  t: (th: string, en: string, zh: string, ja: string, ko: string) => string
+  onShowBill: () => void
+  onContinue: () => void
+}) {
+  useEffect(() => {
+    const timer = setTimeout(() => onContinue(), 8000)  // auto-dismiss after 8s
+    return () => clearTimeout(timer)
+  }, [onContinue])
+
+  return (
+    <div className="fixed inset-0 z-[55] bg-white flex items-center justify-center p-6">
+      <div className="text-center max-w-sm">
+        <div className="w-32 h-32 mx-auto rounded-full border-8 border-green-600 flex items-center justify-center mb-6">
+          <svg className="w-20 h-20 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+          </svg>
+        </div>
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">
+          {t('สั่งอาหารสำเร็จ', 'Order Sent!', '点餐成功', '注文送信完了', '주문 완료')}
+        </h1>
+        <p className="text-gray-600 mb-8">
+          {t('ขอเวลาสักครู่ เรากำลังเตรียมอาหารสำหรับคุณ', 'Please wait, we are preparing your food', '请稍等，正在准备您的食物', 'お料理をご用意しております', '음식을 준비하고 있습니다')}
+        </p>
+        <div className="space-y-3">
+          <button onClick={onShowBill} className="w-full py-3 rounded-full border-2 border-green-700 text-green-700 font-semibold">
+            {t('รายการอาหารที่สั่งจากเว็บ', 'View Order List', '查看订单', '注文一覧', '주문 내역')}
+          </button>
+          <button onClick={onContinue} className="w-full py-3 rounded-full border-2 border-green-700 text-green-700 font-semibold">
+            {t('สั่งอาหารเพิ่ม', 'Order More', '继续点餐', '追加注文', '추가 주문')}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Thank you (after paid) ───
+function ThankYouScreen({ paidAmount, table, t }: {
+  paidAmount: number
+  table: { table_number: number; label: string | null } | null
+  t: (th: string, en: string, zh: string, ja: string, ko: string) => string
+}) {
+  return (
+    <div className="fixed inset-0 z-[60] bg-gradient-to-br from-green-50 via-white to-orange-50 flex items-center justify-center p-6 overflow-y-auto">
+      <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8 text-center border-2 border-green-200">
+        <div className="mx-auto w-20 h-20 rounded-full bg-green-100 flex items-center justify-center mb-5 animate-bounce">
+          <div className="text-5xl">✅</div>
+        </div>
+        <h1 className="text-2xl font-bold text-green-700 mb-2">
+          {t('ชำระเงินสำเร็จ', 'Payment Successful', '付款成功', 'お支払い完了', '결제 완료')}
+        </h1>
+        {paidAmount > 0 && (
+          <div className="my-5 py-4 bg-green-50 rounded-2xl border border-green-200">
+            <p className="text-xs text-gray-600 mb-1">{t('ยอดที่ชำระ', 'Amount Paid', '已付金额', 'お支払い金額', '결제 금액')}</p>
+            <p className="text-3xl font-bold text-green-700">฿{paidAmount.toLocaleString()}</p>
+          </div>
+        )}
+        <div className="my-6 space-y-2">
+          <p className="text-xl font-semibold text-gray-900">{t('ขอบคุณที่ใช้บริการ', 'Thank You!', '感谢光临', 'ありがとうございました', '감사합니다')}</p>
+          <p className="text-sm text-gray-600">{t('หวังว่าจะได้พบกันใหม่ 🙏', 'Hope to see you again 🙏', '期待再次光临 🙏', 'またのご来店をお待ちしております 🙏', '다시 만나기를 기대합니다 🙏')}</p>
+        </div>
+        {table?.table_number && (
+          <p className="text-xs text-gray-400 mb-6">{t('โต๊ะ', 'Table', '桌', 'テーブル', '테이블')} #{table.table_number}</p>
+        )}
+        <button onClick={() => window.location.reload()} className="w-full px-6 py-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl font-semibold">
+          {t('สั่งใหม่', 'Order Again', '再次点餐', 'もう一度注文', '다시 주문')}
+        </button>
+      </div>
     </div>
   )
 }

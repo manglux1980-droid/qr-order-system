@@ -1,89 +1,85 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase/server'
-import { omise } from '@/lib/omise'
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@/lib/supabase/server';
+import { omise } from '@/lib/omise';
 
+// POST body: { session_id, method, amount }
+// method: 'promptpay' | 'alipay_plus' | 'truemoney'
 export async function POST(req: NextRequest) {
-  const { session_id, method, amount } = await req.json()
-  // method: 'promptpay' | 'alipay_plus'
+  const supabase = await createClient();
+  const body = await req.json();
+  const { session_id, method, amount } = body;
 
   if (!session_id || !method || !amount) {
-    return NextResponse.json({ error: 'missing fields' }, { status: 400 })
+    return NextResponse.json({ error: 'missing fields' }, { status: 400 });
   }
 
-  const supabase = await createServiceClient()
+  if (method === 'cash') {
+    return NextResponse.json(
+      { error: 'การชำระด้วยเงินสดจัดการผ่านแคชเชียร์' },
+      { status: 400 }
+    );
+  }
 
-  // Get session info
-  const { data: session } = await supabase
+  const { data: session, error: sErr } = await supabase
     .from('table_sessions')
-    .select('id, restaurant_id')
+    .select('id, restaurant_id, status, table_id')
     .eq('id', session_id)
-    .single()
+    .single();
 
-  if (!session) return NextResponse.json({ error: 'session not found' }, { status: 404 })
+  if (sErr || !session) {
+    return NextResponse.json({ error: 'session not found' }, { status: 404 });
+  }
+  if (session.status === 'closed') {
+    return NextResponse.json({ error: 'session already closed' }, { status: 400 });
+  }
 
-  // Create payment record (pending)
-  const { data: payment } = await supabase
+  const { data: existingPending } = await supabase
     .from('payments')
-    .insert({
-      session_id,
-      restaurant_id: session.restaurant_id,
-      method,
-      scope: 'full',
-      amount,
-      status: 'pending',
-    })
-    .select()
-    .single()
+    .select('id')
+    .eq('session_id', session_id)
+    .eq('status', 'pending')
+    .neq('method', 'cash')
+    .maybeSingle();
 
-  if (!payment) return NextResponse.json({ error: 'failed to create payment' }, { status: 500 })
+  if (existingPending) {
+    return NextResponse.json(
+      { error: 'มีการชำระเงินที่รอดำเนินการอยู่แล้ว', payment_id: existingPending.id },
+      { status: 409 }
+    );
+  }
 
   try {
-    // Create Omise source
-    const sourceType = method === 'promptpay' ? 'promptpay' : 'alipay'
-    const source = await omise.sources.create({
-      type: sourceType,
-      amount: Math.round(amount * 100), // satang
-      currency: 'thb',
-    })
-
-    // Create charge
-    const charge = await omise.charges.create({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const charge: any = await omise.charges.create({
       amount: Math.round(amount * 100),
       currency: 'thb',
-      source: source.id,
-      metadata: {
-        payment_id: payment.id,
-        session_id,
-      },
-    })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      source: { type: method === 'promptpay' ? 'promptpay' : method } as any,
+      metadata: { session_id, restaurant_id: session.restaurant_id },
+    });
 
-    // Extract QR code URL
-    const qrImageUrl =
-      method === 'promptpay'
-        ? (charge.source as { scannable_code?: { image?: { download_uri?: string } } })?.scannable_code?.image?.download_uri
-        : charge.authorize_uri
-
-    // Update payment with charge ref + QR
-    await supabase
+    const { data: payment, error: payErr } = await supabase
       .from('payments')
-      .update({
-        gateway_ref: charge.id,
-        qr_image_url: qrImageUrl,
+      .insert({
+        session_id,
+        restaurant_id: session.restaurant_id,
+        method,
+        amount,
+        status: 'pending',
+        omise_charge_id: charge.id,
       })
-      .eq('id', payment.id)
+      .select()
+      .single();
+
+    if (payErr) return NextResponse.json({ error: payErr.message }, { status: 500 });
 
     return NextResponse.json({
-      payment_id: payment.id,
+      payment,
       charge_id: charge.id,
-      qr_image_url: qrImageUrl,
-      method,
-      amount,
-    })
+      qr_code: charge.source?.scannable_code?.image?.download_uri ?? null,
+    });
   } catch (err) {
-    await supabase
-      .from('payments')
-      .update({ status: 'failed' })
-      .eq('id', payment.id)
-    return NextResponse.json({ error: (err as Error).message }, { status: 500 })
+    const msg = err instanceof Error ? err.message : 'omise error';
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
