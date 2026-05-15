@@ -6,7 +6,6 @@ import { getMenuName, getMenuDesc, getCategoryName, localeNames } from '@/lib/i1
 import type { MenuItem, MenuCategory, Locale } from '@/lib/types'
 import { Globe, Minus, Plus, X, ArrowLeft, ShoppingCart, ChevronRight, Loader2 } from 'lucide-react'
 
-// ─── Types ───
 type OptionGroupItem = {
   id: string
   name_th: string
@@ -48,7 +47,13 @@ type CartItem = {
   unitPrice: number
 }
 
-type Step = 'categories' | 'items' | 'option_picker' | 'checkout' | 'payment' | 'success'
+type Step = 'categories' | 'items' | 'option_picker' | 'payment' | 'success'
+
+function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
+  if (!v) return null
+  if (Array.isArray(v)) return v[0] ?? null
+  return v
+}
 
 export default function PreorderPage({
   params,
@@ -75,20 +80,13 @@ export default function PreorderPage({
   const [cart, setCart] = useState<CartItem[]>([])
   const [showCart, setShowCart] = useState(false)
 
-  // Customer info
-  const [customerName, setCustomerName] = useState('')
-  const [customerPhone, setCustomerPhone] = useState('')
-
-  // Payment
   const [qrPaymentImg, setQrPaymentImg] = useState<string | null>(null)
   const [paymentId, setPaymentId] = useState<string | null>(null)
-  const [orderId, setOrderId] = useState<string | null>(null)
   const [pickupCode, setPickupCode] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [paid, setPaid] = useState(false)
   const [totalPaid, setTotalPaid] = useState(0)
 
-  // i18n detect
   useEffect(() => {
     const lang = navigator.language.toLowerCase()
     if (lang.startsWith('zh')) setLocale('zh')
@@ -102,7 +100,6 @@ export default function PreorderPage({
 
   async function init() {
     setLoading(true)
-    // Verify QR
     const { data: qr } = await supabase
       .from('preorder_qr')
       .select('id, restaurant_id, is_active')
@@ -146,19 +143,23 @@ export default function PreorderPage({
       setCategories(cats || [])
       setItems(menuItems || [])
 
+      type LinkRow = {
+        menu_item_id: string
+        option_groups: OptionGroup | OptionGroup[]
+      }
       const groupMap: Record<string, OptionGroup[]> = {}
-      type LinkRow = { menu_item_id: string; option_groups: OptionGroup }
-      for (const link of ((links as unknown) as LinkRow[] ?? [])) {
+      for (const link of (((links as unknown) as LinkRow[]) ?? [])) {
         const mid = link.menu_item_id
+        const og = unwrapOne(link.option_groups)
+        if (!og) continue
         if (!groupMap[mid]) groupMap[mid] = []
-        groupMap[mid].push(link.option_groups)
+        groupMap[mid].push(og)
       }
       setOptionGroupsByItem(groupMap)
     }
     setLoading(false)
   }
 
-  // Realtime: listen for payment confirmation
   useEffect(() => {
     if (!paymentId) return
     const channel = supabase
@@ -219,20 +220,15 @@ export default function PreorderPage({
   const cartCount = cart.reduce((s, c) => s + c.quantity, 0)
   const cartTotal = cart.reduce((s, c) => s + c.unitPrice * c.quantity, 0)
 
-  // ─── Checkout flow ───
+  // ─── Submit directly to payment (no customer info needed) ───
   async function submitOrder() {
-    if (!customerName.trim() || !customerPhone.trim()) {
-      alert(t('กรุณากรอกชื่อและเบอร์โทร', 'Please enter name and phone', '请输入姓名和电话', 'お名前と電話番号', '이름과 전화번호 입력'))
-      return
-    }
+    if (cart.length === 0) return
     setSubmitting(true)
     const res = await fetch('/api/preorder/checkout', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         preorder_qr_token: qrToken,
-        customer_name: customerName,
-        customer_phone: customerPhone,
         items: cart.map(c => ({
           menu_item_id: c.menuItem.id,
           quantity: c.quantity,
@@ -257,13 +253,12 @@ export default function PreorderPage({
     }
     setQrPaymentImg(data.qr_code)
     setPaymentId(data.payment_id)
-    setOrderId(data.order_id)
     setPickupCode(data.pickup_code)
     setTotalPaid(data.total)
+    setShowCart(false)
     setStep('payment')
   }
 
-  // ─── Render states ───
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="text-center">
@@ -283,7 +278,7 @@ export default function PreorderPage({
     </div>
   )
 
-  // Success screen
+  // ─── Success screen ───
   if (step === 'success' && pickupCode) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-50 to-white flex items-center justify-center p-6">
@@ -297,25 +292,15 @@ export default function PreorderPage({
             {t('สั่งล่วงหน้าสำเร็จ', 'Pre-order Successful', '预订成功', '事前注文完了', '예약 완료')}
           </h1>
           <p className="text-sm text-gray-600 mb-6">
-            {t('แจ้งเลขออเดอร์นี้ที่ร้านเพื่อรับอาหาร', 'Show this code to pick up your food', '请向店员出示此号码取餐', 'この番号をお伝えください', '이 번호를 알려주세요')}
+            {t('แจ้งเลขนี้ที่ร้านเพื่อรับอาหาร', 'Show this code to pick up your food', '请向店员出示此号码取餐', 'この番号をお伝えください', '이 번호를 알려주세요')}
           </p>
           <div className="my-6 py-6 bg-orange-50 rounded-2xl border-2 border-orange-300">
             <p className="text-xs text-gray-600 mb-2">{t('เลขออเดอร์ของคุณ', 'Your Order Code', '订单号', 'ご注文番号', '주문 번호')}</p>
             <p className="text-5xl font-bold text-orange-600 tracking-wider">{pickupCode}</p>
           </div>
-          <div className="text-left bg-gray-50 rounded-xl p-4 my-4 space-y-1">
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-600">{t('ชื่อ', 'Name', '姓名', 'お名前', '이름')}</span>
-              <span className="font-medium">{customerName}</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-600">{t('เบอร์', 'Phone', '电话', '電話', '전화')}</span>
-              <span className="font-medium">{customerPhone}</span>
-            </div>
-            <div className="flex justify-between text-sm pt-2 border-t border-gray-200">
-              <span className="text-gray-600">{t('ยอดชำระ', 'Total Paid', '已付', 'お支払い', '결제 완료')}</span>
-              <span className="font-bold text-green-700">฿{totalPaid.toLocaleString()}</span>
-            </div>
+          <div className="flex justify-between text-sm bg-gray-50 rounded-xl p-3 mb-4">
+            <span className="text-gray-600">{t('ยอดชำระ', 'Total Paid', '已付', 'お支払い', '결제 완료')}</span>
+            <span className="font-bold text-green-700">฿{totalPaid.toLocaleString()}</span>
           </div>
           <p className="text-xs text-gray-500 mb-4">
             {t('ระบบจะแจ้งร้านอัตโนมัติ มารับได้เลย', 'Restaurant has been notified', '餐厅已收到', '店舗に通知済', '식당에 알림 전송')}
@@ -331,7 +316,7 @@ export default function PreorderPage({
     )
   }
 
-  // Payment screen
+  // ─── Payment screen ───
   if (step === 'payment') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
@@ -367,78 +352,7 @@ export default function PreorderPage({
     )
   }
 
-  // Checkout step (customer info)
-  if (step === 'checkout') {
-    return (
-      <div className="min-h-screen bg-gray-50">
-        <div className="sticky top-0 bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-3 z-30">
-          <button onClick={() => setStep('items')} className="p-1.5 -ml-1.5 rounded-full hover:bg-gray-100">
-            <ArrowLeft size={20} className="text-green-700" />
-          </button>
-          <h1 className="font-bold text-gray-900 flex-1">
-            {t('ข้อมูลผู้สั่ง', 'Customer Info', '顾客信息', 'お客様情報', '고객 정보')}
-          </h1>
-        </div>
-
-        <div className="px-4 py-6 space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              {t('ชื่อ', 'Name', '姓名', 'お名前', '이름')} <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="text"
-              value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-xl text-gray-900"
-              placeholder={t('ชื่อสำหรับเรียกรับอาหาร', 'Name for pickup', '取餐姓名', 'ピックアップ用', '픽업용 이름')}
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              {t('เบอร์โทรศัพท์', 'Phone', '电话', '電話番号', '전화번호')} <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="tel"
-              value={customerPhone}
-              onChange={(e) => setCustomerPhone(e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-xl text-gray-900"
-              placeholder="08x-xxx-xxxx"
-            />
-          </div>
-
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-800">
-            ℹ️ {t('สั่งล่วงหน้าต้องชำระเงินก่อน เมื่อจ่ายเสร็จจะได้รับเลขออเดอร์', 'Pre-orders require payment first. You will receive an order code.', '预订需要先付款，付款后获得订单号', '事前注文は前払いが必要', '예약 주문은 선결제 필요')}
-          </div>
-
-          <div className="bg-gray-50 rounded-xl p-4">
-            <p className="text-sm font-medium text-gray-700 mb-2">
-              {t('สรุปออเดอร์', 'Order Summary', '订单摘要', '注文概要', '주문 요약')}
-            </p>
-            {cart.map(c => (
-              <div key={c.cartId} className="text-xs text-gray-700 mb-1">
-                {c.quantity}x {getMenuName(c.menuItem as unknown as Record<string, unknown>, locale)}
-                <span className="float-right">฿{(c.unitPrice * c.quantity).toLocaleString()}</span>
-              </div>
-            ))}
-            <div className="border-t border-gray-300 mt-2 pt-2 flex justify-between font-bold">
-              <span>Total</span>
-              <span className="text-green-700">฿{cartTotal.toLocaleString()}</span>
-            </div>
-          </div>
-
-          <button
-            onClick={submitOrder}
-            disabled={submitting || !customerName.trim() || !customerPhone.trim()}
-            className="w-full py-4 bg-green-700 hover:bg-green-800 disabled:bg-gray-300 text-white font-bold rounded-full"
-          >
-            {submitting ? t('กำลังส่ง...', 'Sending...', '提交中...', '送信中...', '전송 중...') : t('ดำเนินการชำระเงิน', 'Proceed to Payment', '前往支付', '支払いへ', '결제로')}
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  // Option picker
+  // ─── Option picker ───
   if (step === 'option_picker' && pickingItem) {
     return (
       <OptionPicker
@@ -452,7 +366,6 @@ export default function PreorderPage({
     )
   }
 
-  // Header for categories + items
   const activeCategory = categories.find(c => c.id === activeCategoryId)
   const categoryItems = items.filter(it => it.category_id === activeCategoryId)
 
@@ -491,7 +404,7 @@ export default function PreorderPage({
     </div>
   )
 
-  // STEP 1: Categories
+  // ─── Categories ───
   if (step === 'categories') {
     return (
       <div className="min-h-screen bg-gray-50 pb-28">
@@ -532,12 +445,12 @@ export default function PreorderPage({
           </div>
         )}
 
-        {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} isPreorder onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={() => { setShowCart(false); setStep('checkout') }} submitting={false} />}
+        {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} submitting={submitting} onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={submitOrder} />}
       </div>
     )
   }
 
-  // STEP 2: Items
+  // ─── Items ───
   return (
     <div className="min-h-screen bg-gray-50 pb-28">
       {Header}
@@ -594,12 +507,15 @@ export default function PreorderPage({
         </div>
       )}
 
-      {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} isPreorder onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={() => { setShowCart(false); setStep('checkout') }} submitting={false} />}
+      {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} submitting={submitting} onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={submitOrder} />}
     </div>
   )
 }
 
-// ─── Reused components ───
+// ═══════════════════════════════════════════════════
+// SUB-COMPONENTS
+// ═══════════════════════════════════════════════════
+
 function OptionPicker({
   menuItem, groups, locale, t, onCancel, onConfirm,
 }: {
@@ -766,17 +682,16 @@ function OptionPicker({
 }
 
 function CartDrawer({
-  cart, cartTotal, locale, t, isPreorder,
-  onClose, onUpdateQty, onRemove, onContinue, onSubmit, submitting,
+  cart, cartTotal, locale, t, submitting,
+  onClose, onUpdateQty, onRemove, onContinue, onSubmit,
 }: {
-  cart: CartItem[]; cartTotal: number; locale: Locale; isPreorder?: boolean
+  cart: CartItem[]; cartTotal: number; locale: Locale; submitting: boolean
   t: (th: string, en: string, zh: string, ja: string, ko: string) => string
   onClose: () => void
   onUpdateQty: (id: string, delta: number) => void
   onRemove: (id: string) => void
   onContinue: () => void
   onSubmit: () => void
-  submitting: boolean
 }) {
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end">
@@ -828,9 +743,9 @@ function CartDrawer({
               {t('สั่งเพิ่ม', 'Add more', '继续点餐', '追加', '추가')}
             </button>
             <button onClick={onSubmit} disabled={submitting || cart.length === 0} className="flex-1 py-3 rounded-full bg-green-700 disabled:bg-gray-300 text-white font-bold text-sm">
-              {isPreorder
-                ? t('ถัดไป (ชำระเงิน)', 'Next (Pay)', '下一步（付款）', '次へ（お支払い）', '다음 (결제)')
-                : t('ส่งรายการ', 'Send Order', '提交', '送信', '전송')}
+              {submitting
+                ? t('กำลังส่ง...', 'Sending...', '提交中...', '送信中...', '전송 중...')
+                : t('ชำระเงิน', 'Pay Now', '付款', 'お支払い', '결제')}
             </button>
           </div>
         </div>
