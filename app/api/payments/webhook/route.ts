@@ -1,10 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/server'
+import crypto from 'crypto'
 
 export async function POST(req: NextRequest) {
-  const event = await req.json()
+  const rawBody = await req.text()
 
-  // Omise sends events like: charge.complete, charge.expire
+  // Verify Omise webhook signature
+  const signature = req.headers.get('omise-signature')
+  const secret = process.env.OMISE_WEBHOOK_SECRET
+
+  if (secret && signature) {
+    const expected = crypto
+      .createHmac('sha256', secret)
+      .update(rawBody)
+      .digest('hex')
+    if (signature !== expected) {
+      return NextResponse.json({ error: 'invalid signature' }, { status: 401 })
+    }
+  }
+
+  const event = JSON.parse(rawBody)
+
   if (event.key !== 'charge.complete' && event.key !== 'charge.expire') {
     return NextResponse.json({ ok: true })
   }
@@ -15,7 +31,6 @@ export async function POST(req: NextRequest) {
   if (!paymentId) return NextResponse.json({ error: 'no payment_id' }, { status: 400 })
 
   const supabase = await createServiceClient()
-
   const newStatus = charge.status === 'successful' ? 'paid' : 'failed'
 
   await supabase
@@ -26,7 +41,6 @@ export async function POST(req: NextRequest) {
     })
     .eq('id', paymentId)
 
-  // If paid, close session and mark all orders as served
   if (newStatus === 'paid') {
     const { data: payment } = await supabase
       .from('payments')
