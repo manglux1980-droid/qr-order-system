@@ -1,10 +1,9 @@
 'use client'
 
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { Bell, DollarSign, UtensilsCrossed, CheckCircle, Clock, ChefHat, Loader2, Volume2, VolumeX } from 'lucide-react'
+import { Bell, DollarSign, UtensilsCrossed, CheckCircle, ChefHat, Loader2, Volume2, VolumeX } from 'lucide-react'
 
-// ─── Types ───────────────────────────────────────────────────
 interface OrderItem {
   id: string
   menu_item_id: string
@@ -20,8 +19,10 @@ interface Order {
   status: string
   created_at: string
   nickname: string | null
+  session_id: string
   order_items: OrderItem[]
   table_sessions: {
+    id: string
     session_code: string
     tables: { table_number: number; label: string | null }
   }
@@ -37,7 +38,6 @@ interface MenuItem {
 
 type Tab = 'orders' | 'cashier' | 'menu'
 
-// ─── Speech helper ───────────────────────────────────────────
 function speak(text: string) {
   if (typeof window === 'undefined') return
   window.speechSynthesis.cancel()
@@ -67,7 +67,6 @@ function playBeep(type: 'order' | 'payment') {
   } catch {}
 }
 
-// ─── Main Component ──────────────────────────────────────────
 export default function OwnerPage() {
   const supabase = createClient()
   const [tab, setTab] = useState<Tab>('orders')
@@ -81,7 +80,6 @@ export default function OwnerPage() {
 
   useEffect(() => { soundOnRef.current = soundOn }, [soundOn])
 
-  // ── Init ──
   useEffect(() => {
     initOwner()
   }, [])
@@ -98,36 +96,40 @@ export default function OwnerPage() {
     if (!ru) return
 
     setRestaurantId(ru.restaurant_id)
+
+    // Subscribe FIRST so we don't miss any events
+    subscribeRealtime(ru.restaurant_id)
     await Promise.all([
       loadOrders(ru.restaurant_id),
       loadMenu(ru.restaurant_id),
     ])
-    subscribeRealtime(ru.restaurant_id)
     setLoading(false)
   }
 
-  // ── Load orders ──
   async function loadOrders(rid: string) {
     const { data } = await supabase
       .from('orders')
       .select(`
-        id, status, created_at, nickname,
+        id, status, created_at, nickname, session_id,
         order_items (id, menu_item_id, quantity, price_snapshot, note, status,
           menu_items (name_th)
         ),
-        table_sessions (session_code,
+        table_sessions!inner (id, session_code, status,
           tables (table_number, label)
         )
       `)
       .eq('restaurant_id', rid)
       .in('status', ['confirmed', 'cooking', 'served'])
       .order('created_at', { ascending: false })
-      .limit(30)
+      .limit(50)
 
-    setOrders((data as unknown as Order[]) || [])
+    // Filter out orders from closed sessions
+    const filtered = ((data as unknown as Order[]) || []).filter(
+      o => (o.table_sessions as unknown as { status: string })?.status !== 'closed'
+    )
+    setOrders(filtered)
   }
 
-  // ── Load menu ──
   async function loadMenu(rid: string) {
     const { data } = await supabase
       .from('menu_items')
@@ -137,7 +139,6 @@ export default function OwnerPage() {
     setMenuItems(data || [])
   }
 
-  // ── Realtime subscription ──
   function subscribeRealtime(rid: string) {
     supabase
       .channel('owner-orders')
@@ -146,17 +147,15 @@ export default function OwnerPage() {
         schema: 'public',
         table: 'order_items',
       }, async () => {
-        // Reload orders
         await loadOrders(rid)
-        // Fetch latest order for alert
         const { data } = await supabase
           .from('orders')
           .select(`
-            id, status, created_at, nickname,
+            id, status, created_at, nickname, session_id,
             order_items (id, quantity, price_snapshot, note, status, menu_item_id,
               menu_items (name_th)
             ),
-            table_sessions (session_code,
+            table_sessions (id, session_code,
               tables (table_number, label)
             )
           `)
@@ -191,23 +190,24 @@ export default function OwnerPage() {
       .subscribe()
   }
 
-  // ── Update order status ──
   async function updateOrderStatus(orderId: string, status: string) {
     await supabase.from('orders').update({ status }).eq('id', orderId)
     setOrders(prev => prev.map(o => o.id === orderId ? { ...o, status } : o))
   }
 
-  // ── Toggle menu item ──
   async function toggleMenuItem(id: string, current: boolean) {
     await supabase.from('menu_items').update({ is_available: !current }).eq('id', id)
     setMenuItems(prev => prev.map(m => m.id === id ? { ...m, is_available: !current } : m))
   }
 
-  // ── Cash payment ──
+  // Receive cash for a single order
   async function receiveCash(order: Order) {
     const total = order.order_items.reduce((s, i) => s + i.price_snapshot * i.quantity, 0)
+    const sessionId = order.session_id || order.table_sessions?.id
+
+    // Record payment
     await supabase.from('payments').insert({
-      session_id: (order as any).session_id,
+      session_id: sessionId,
       restaurant_id: restaurantId,
       method: 'cash',
       scope: 'full',
@@ -215,7 +215,56 @@ export default function OwnerPage() {
       status: 'paid',
       paid_at: new Date().toISOString(),
     })
-    await updateOrderStatus(order.id, 'served')
+
+    // Mark all orders in this session as served
+    await supabase
+      .from('orders')
+      .update({ status: 'served' })
+      .eq('session_id', sessionId)
+
+    // CLOSE the session — next customers scanning this table get a NEW session
+    await supabase
+      .from('table_sessions')
+      .update({ status: 'closed', closed_at: new Date().toISOString() })
+      .eq('id', sessionId)
+
+    // Remove orders of closed session from UI
+    setOrders(prev => prev.filter(o => o.session_id !== sessionId))
+
+    if (soundOnRef.current) {
+      playBeep('payment')
+      setTimeout(() => speak(`รับเงินแล้ว ${total.toLocaleString()} บาท`), 300)
+    }
+  }
+
+  // Receive cash for entire table (sum all orders in session)
+  async function receiveCashForTable(sessionId: string) {
+    const tableOrders = orders.filter(o => o.session_id === sessionId)
+    const total = tableOrders.reduce((sum, o) =>
+      sum + o.order_items.reduce((s, i) => s + i.price_snapshot * i.quantity, 0), 0)
+
+    await supabase.from('payments').insert({
+      session_id: sessionId,
+      restaurant_id: restaurantId,
+      method: 'cash',
+      scope: 'full',
+      amount: total,
+      status: 'paid',
+      paid_at: new Date().toISOString(),
+    })
+
+    await supabase
+      .from('orders')
+      .update({ status: 'served' })
+      .eq('session_id', sessionId)
+
+    await supabase
+      .from('table_sessions')
+      .update({ status: 'closed', closed_at: new Date().toISOString() })
+      .eq('id', sessionId)
+
+    setOrders(prev => prev.filter(o => o.session_id !== sessionId))
+
     if (soundOnRef.current) {
       playBeep('payment')
       setTimeout(() => speak(`รับเงินแล้ว ${total.toLocaleString()} บาท`), 300)
@@ -249,10 +298,17 @@ export default function OwnerPage() {
   const activeOrders = orders.filter(o => ['confirmed', 'cooking'].includes(o.status))
   const servedOrders = orders.filter(o => o.status === 'served')
 
+  // Group orders by session for cashier tab
+  const sessionGroups = orders.reduce((acc, o) => {
+    const sid = o.session_id
+    if (!acc[sid]) acc[sid] = { sessionId: sid, orders: [], label: tableLabel(o) }
+    acc[sid].orders.push(o)
+    return acc
+  }, {} as Record<string, { sessionId: string; orders: Order[]; label: string }>)
+
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col max-w-lg mx-auto">
 
-      {/* Header */}
       <div className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center gap-2">
           <span className="text-xl">🍽️</span>
@@ -267,7 +323,6 @@ export default function OwnerPage() {
         </button>
       </div>
 
-      {/* New order alert banner */}
       {newOrderAlert && (
         <div className="bg-orange-500 text-white px-4 py-3 flex items-center gap-3 animate-pulse">
           <Bell size={20} />
@@ -280,10 +335,8 @@ export default function OwnerPage() {
         </div>
       )}
 
-      {/* Content */}
       <div className="flex-1 overflow-y-auto pb-20">
 
-        {/* ── ORDERS TAB ── */}
         {tab === 'orders' && (
           <div className="p-4 space-y-3">
             {activeOrders.length === 0 && (
@@ -295,7 +348,6 @@ export default function OwnerPage() {
             )}
             {activeOrders.map(order => (
               <div key={order.id} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-                {/* Order header */}
                 <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
                   <div className="flex items-center gap-2">
                     <span className="font-bold text-gray-900 text-lg">{tableLabel(order)}</span>
@@ -308,7 +360,6 @@ export default function OwnerPage() {
                   </span>
                 </div>
 
-                {/* Items */}
                 <div className="px-4 py-2 space-y-1.5">
                   {order.order_items.map(item => (
                     <div key={item.id} className="flex items-center justify-between">
@@ -324,7 +375,6 @@ export default function OwnerPage() {
                   ))}
                 </div>
 
-                {/* Total + Actions */}
                 <div className="px-4 py-3 bg-gray-50 flex items-center justify-between gap-2">
                   <span className="font-bold text-gray-900">฿{orderTotal(order).toLocaleString()}</span>
                   <div className="flex gap-2">
@@ -349,7 +399,6 @@ export default function OwnerPage() {
               </div>
             ))}
 
-            {/* Served orders (collapsed) */}
             {servedOrders.length > 0 && (
               <div>
                 <p className="text-xs text-gray-400 font-medium mb-2 px-1">เสิร์ฟแล้ว ({servedOrders.length})</p>
@@ -367,49 +416,51 @@ export default function OwnerPage() {
           </div>
         )}
 
-        {/* ── CASHIER TAB ── */}
         {tab === 'cashier' && (
           <div className="p-4 space-y-3">
-            {servedOrders.length === 0 && (
+            {Object.keys(sessionGroups).length === 0 && (
               <div className="text-center py-16 text-gray-400">
                 <DollarSign size={40} className="mx-auto mb-3 opacity-30" />
                 <p className="font-medium">ยังไม่มีรายการรอเก็บเงิน</p>
               </div>
             )}
-            {[...activeOrders, ...servedOrders].map(order => (
-              <div key={order.id} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
-                  <span className="font-bold text-gray-900 text-lg">{tableLabel(order)}</span>
-                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor[order.status]}`}>
-                    {statusLabel[order.status]}
-                  </span>
-                </div>
-                <div className="px-4 py-2 space-y-1.5">
-                  {order.order_items.map(item => (
-                    <div key={item.id} className="flex justify-between text-sm">
-                      <span className="text-gray-700">{item.menu_items?.name_th} x{item.quantity}</span>
-                      <span className="text-gray-500">฿{(item.price_snapshot * item.quantity).toLocaleString()}</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="px-4 py-3 bg-gray-50 flex items-center justify-between">
-                  <div>
-                    <p className="text-xs text-gray-400">ยอดรวม</p>
-                    <p className="font-bold text-xl text-gray-900">฿{orderTotal(order).toLocaleString()}</p>
+            {Object.values(sessionGroups).map(group => {
+              const sessionTotal = group.orders.reduce((sum, o) =>
+                sum + o.order_items.reduce((s, i) => s + i.price_snapshot * i.quantity, 0), 0)
+              const allItems = group.orders.flatMap(o => o.order_items)
+
+              return (
+                <div key={group.sessionId} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+                    <span className="font-bold text-gray-900 text-lg">{group.label}</span>
+                    <span className="text-xs text-gray-400">{group.orders.length} ออเดอร์</span>
                   </div>
-                  <button
-                    onClick={() => receiveCash(order)}
-                    className="flex items-center gap-2 px-5 py-3 bg-green-500 hover:bg-green-600 text-white rounded-xl font-bold text-sm transition-colors"
-                  >
-                    <DollarSign size={18} /> รับเงินแล้ว
-                  </button>
+                  <div className="px-4 py-2 space-y-1.5">
+                    {allItems.map(item => (
+                      <div key={item.id} className="flex justify-between text-sm">
+                        <span className="text-gray-700">{item.menu_items?.name_th} x{item.quantity}</span>
+                        <span className="text-gray-500">฿{(item.price_snapshot * item.quantity).toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="px-4 py-3 bg-gray-50 flex items-center justify-between">
+                    <div>
+                      <p className="text-xs text-gray-400">ยอดรวม</p>
+                      <p className="font-bold text-xl text-gray-900">฿{sessionTotal.toLocaleString()}</p>
+                    </div>
+                    <button
+                      onClick={() => receiveCashForTable(group.sessionId)}
+                      className="flex items-center gap-2 px-5 py-3 bg-green-500 hover:bg-green-600 text-white rounded-xl font-bold text-sm transition-colors"
+                    >
+                      <DollarSign size={18} /> รับเงินแล้ว
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
 
-        {/* ── MENU TAB ── */}
         {tab === 'menu' && (
           <div className="p-4 space-y-2">
             <p className="text-xs text-gray-400 px-1 mb-3">กดเปิด/ปิดเมนูที่หมดได้เลย</p>
@@ -439,11 +490,10 @@ export default function OwnerPage() {
         )}
       </div>
 
-      {/* Bottom nav */}
       <div className="fixed bottom-0 left-0 right-0 max-w-lg mx-auto bg-white border-t border-gray-200 flex z-30">
         {[
           { key: 'orders', label: 'ออเดอร์', icon: Bell, badge: activeOrders.length },
-          { key: 'cashier', label: 'เก็บเงิน', icon: DollarSign, badge: servedOrders.length },
+          { key: 'cashier', label: 'เก็บเงิน', icon: DollarSign, badge: Object.keys(sessionGroups).length },
           { key: 'menu', label: 'เมนู', icon: UtensilsCrossed, badge: 0 },
         ].map(({ key, label, icon: Icon, badge }) => (
           <button
