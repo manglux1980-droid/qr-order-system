@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { Plus, Pencil, Trash2, Eye, EyeOff, Loader2, ChevronDown, ChevronUp, Sparkles, X } from 'lucide-react'
+import { Plus, Pencil, Trash2, Eye, EyeOff, Loader2, ChevronDown, ChevronUp, Sparkles, X, Upload } from 'lucide-react'
 import type { MenuItem, MenuCategory, Locale } from '@/lib/types'
 import MenuItemForm from '@/components/admin/MenuItemForm'
 
@@ -14,21 +14,22 @@ const LOCALES: { key: Locale; label: string }[] = [
   { key: 'ko', label: '🇰🇷 한국어' },
 ]
 
+// Extended category type to include image_url
+type CategoryWithImage = MenuCategory & { image_url?: string | null }
+
 export default function MenuPage() {
   const supabase = createClient()
-  const [categories, setCategories] = useState<MenuCategory[]>([])
+  const [categories, setCategories] = useState<CategoryWithImage[]>([])
   const [items, setItems] = useState<MenuItem[]>([])
   const [loading, setLoading] = useState(true)
   const [restaurantId, setRestaurantId] = useState<string>('')
 
-  // Modal state
   const [showForm, setShowForm] = useState(false)
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null)
   const [presetCategoryId, setPresetCategoryId] = useState<string | null>(null)
 
-  // Category form modal
   const [showCategoryModal, setShowCategoryModal] = useState(false)
-  const [editingCategory, setEditingCategory] = useState<MenuCategory | null>(null)
+  const [editingCategory, setEditingCategory] = useState<CategoryWithImage | null>(null)
 
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set())
 
@@ -53,7 +54,7 @@ export default function MenuPage() {
       supabase.from('menu_items').select('*').eq('restaurant_id', ru.restaurant_id).order('sort_order'),
     ])
 
-    setCategories(cats || [])
+    setCategories((cats as CategoryWithImage[]) || [])
     setItems(menuItems || [])
     setExpandedCategories(new Set((cats || []).map(c => c.id)))
     setLoading(false)
@@ -91,7 +92,7 @@ export default function MenuPage() {
     setShowCategoryModal(true)
   }
 
-  function openEditCategory(cat: MenuCategory) {
+  function openEditCategory(cat: CategoryWithImage) {
     setEditingCategory(cat)
     setShowCategoryModal(true)
   }
@@ -131,7 +132,6 @@ export default function MenuPage() {
         </div>
       </div>
 
-      {/* Categories + Items */}
       <div className="space-y-4">
         {categories.length === 0 && (
           <div className="text-center py-16 text-gray-400">
@@ -146,10 +146,19 @@ export default function MenuPage() {
             <div key={cat.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
                 <button
-                  className="flex items-center gap-2 text-left flex-1"
+                  className="flex items-center gap-3 text-left flex-1"
                   onClick={() => toggleCategory(cat.id)}
                 >
                   {expanded ? <ChevronUp size={16} className="text-gray-400" /> : <ChevronDown size={16} className="text-gray-400" />}
+                  {/* Category image thumbnail */}
+                  <div className="w-10 h-10 rounded-lg bg-gray-100 overflow-hidden flex-shrink-0">
+                    {cat.image_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={cat.image_url} alt={cat.name_th} className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-lg">📂</div>
+                    )}
+                  </div>
                   <span className="font-medium text-gray-900">{cat.name_th}</span>
                   {cat.name_en && <span className="text-xs text-gray-400 hidden sm:inline">{cat.name_en}</span>}
                   <span className="text-xs text-gray-400 bg-gray-200 px-2 py-0.5 rounded-full">{catItems.length}</span>
@@ -237,20 +246,18 @@ export default function MenuPage() {
         })}
       </div>
 
-      {/* Menu item form modal */}
       {showForm && (
         <MenuItemForm
           restaurantId={restaurantId}
           categories={categories}
           item={editingItem}
-          // @ts-expect-error optional prop - ignored if MenuItemForm doesn't use it
+          // @ts-expect-error optional prop
           presetCategoryId={presetCategoryId}
           onClose={() => { setShowForm(false); setPresetCategoryId(null) }}
           onSaved={() => { setShowForm(false); setPresetCategoryId(null); loadData() }}
         />
       )}
 
-      {/* Category form modal */}
       {showCategoryModal && (
         <CategoryFormModal
           restaurantId={restaurantId}
@@ -265,7 +272,7 @@ export default function MenuPage() {
 }
 
 // ═══════════════════════════════════════════════════
-// Category Form Modal — 5-language + AI translate
+// Category Form Modal — 5-language + image upload + AI translate
 // ═══════════════════════════════════════════════════
 function CategoryFormModal({
   restaurantId,
@@ -275,15 +282,17 @@ function CategoryFormModal({
   onSaved,
 }: {
   restaurantId: string
-  category: MenuCategory | null
+  category: CategoryWithImage | null
   sortOrder: number
   onClose: () => void
   onSaved: () => void
 }) {
   const supabase = createClient()
+  const fileRef = useRef<HTMLInputElement>(null)
   const [activeLocale, setActiveLocale] = useState<Locale>('th')
   const [saving, setSaving] = useState(false)
   const [translating, setTranslating] = useState(false)
+  const [uploading, setUploading] = useState(false)
 
   const [names, setNames] = useState<Record<Locale, string>>({
     th: category?.name_th || '',
@@ -292,6 +301,23 @@ function CategoryFormModal({
     ja: category?.name_ja || '',
     ko: category?.name_ko || '',
   })
+  const [imageUrl, setImageUrl] = useState<string>(category?.image_url || '')
+
+  async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploading(true)
+    const ext = file.name.split('.').pop()
+    const path = `categories/${restaurantId}/${Date.now()}.${ext}`
+    const { error } = await supabase.storage.from('menu-images').upload(path, file)
+    if (!error) {
+      const { data } = supabase.storage.from('menu-images').getPublicUrl(path)
+      setImageUrl(data.publicUrl)
+    } else {
+      alert('อัพโหลดรูปไม่สำเร็จ: ' + error.message)
+    }
+    setUploading(false)
+  }
 
   async function handleTranslate() {
     if (!names.th.trim()) {
@@ -336,6 +362,7 @@ function CategoryFormModal({
       name_zh: names.zh.trim() || null,
       name_ja: names.ja.trim() || null,
       name_ko: names.ko.trim() || null,
+      image_url: imageUrl || null,
     }
 
     if (category) {
@@ -364,6 +391,50 @@ function CategoryFormModal({
         </div>
 
         <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
+          {/* Image upload */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">รูปภาพหมวดหมู่</label>
+            <div className="flex items-start gap-3">
+              <div className="w-24 h-24 rounded-lg bg-gray-100 border border-gray-200 overflow-hidden flex-shrink-0">
+                {imageUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={imageUrl} alt="" className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-3xl">📂</div>
+                )}
+              </div>
+              <div className="flex-1">
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileRef.current?.click()}
+                  disabled={uploading}
+                  className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {uploading ? (
+                    <><Loader2 size={14} className="animate-spin" /> กำลังอัพโหลด...</>
+                  ) : (
+                    <><Upload size={14} /> {imageUrl ? 'เปลี่ยนรูป' : 'อัพโหลดรูป'}</>
+                  )}
+                </button>
+                {imageUrl && (
+                  <button
+                    onClick={() => setImageUrl('')}
+                    className="ml-2 px-3 py-2 text-red-600 text-sm hover:bg-red-50 rounded-lg"
+                  >
+                    ลบรูป
+                  </button>
+                )}
+                <p className="text-xs text-gray-500 mt-1">JPG, PNG ขนาดไม่เกิน 2MB</p>
+              </div>
+            </div>
+          </div>
+
           {/* Language tabs + translate button */}
           <div className="flex items-center justify-between gap-2 border-b border-gray-200">
             <div className="flex gap-1 flex-wrap">
