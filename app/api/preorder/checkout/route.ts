@@ -77,12 +77,22 @@ export async function POST(req: NextRequest) {
   if (iErr) return NextResponse.json({ error: iErr.message }, { status: 500 });
 
   try {
+    const amountSatang = Math.round(total * 100);
+
+    // ─── Step 1: Create source for PromptPay ───
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const source: any = await (omise as any).sources.create({
+      type: 'promptpay',
+      amount: amountSatang,
+      currency: 'thb',
+    });
+
+    // ─── Step 2: Create charge using source id ───
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const charge: any = await omise.charges.create({
-      amount: Math.round(total * 100),
+      amount: amountSatang,
       currency: 'thb',
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      source: { type: 'promptpay' } as any,
+      source: source.id,
       metadata: {
         order_id: order.id,
         restaurant_id: qr.restaurant_id,
@@ -104,17 +114,29 @@ export async function POST(req: NextRequest) {
       .select()
       .single();
 
+    // QR image URL from source (not charge)
+    const qrUrl =
+      source.scannable_code?.image?.download_uri ??
+      charge.source?.scannable_code?.image?.download_uri ??
+      null;
+
     return NextResponse.json({
       order_id: order.id,
       pickup_code: pickupCode,
       payment_id: payment?.id,
-      qr_code: charge.source?.scannable_code?.image?.download_uri ?? null,
+      qr_code: qrUrl,
       total,
     });
   } catch (err) {
+    // Roll back order if Omise fails
     await supabase.from('order_items').delete().eq('order_id', order.id);
     await supabase.from('orders').delete().eq('id', order.id);
-    const msg = err instanceof Error ? err.message : 'omise error';
+
+    // Surface real Omise error message
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const e = err as any;
+    const msg = e?.message || e?.error?.message || 'omise error';
+    console.error('Omise error:', JSON.stringify(e, null, 2));
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

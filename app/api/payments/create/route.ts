@@ -49,12 +49,23 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    const amountSatang = Math.round(amount * 100);
+    const sourceType = method === 'promptpay' ? 'promptpay' : method;
+
+    // ─── Step 1: Create Source ───
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const source: any = await (omise as any).sources.create({
+      type: sourceType,
+      amount: amountSatang,
+      currency: 'thb',
+    });
+
+    // ─── Step 2: Create Charge using source.id ───
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const charge: any = await omise.charges.create({
-      amount: Math.round(amount * 100),
+      amount: amountSatang,
       currency: 'thb',
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      source: { type: method === 'promptpay' ? 'promptpay' : method } as any,
+      source: source.id,
       metadata: { session_id, restaurant_id: session.restaurant_id },
     });
 
@@ -73,13 +84,21 @@ export async function POST(req: NextRequest) {
 
     if (payErr) return NextResponse.json({ error: payErr.message }, { status: 500 });
 
+    const qrUrl =
+      source.scannable_code?.image?.download_uri ??
+      charge.source?.scannable_code?.image?.download_uri ??
+      null;
+
     return NextResponse.json({
       payment,
       charge_id: charge.id,
-      qr_code: charge.source?.scannable_code?.image?.download_uri ?? null,
+      qr_code: qrUrl,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'omise error';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const e = err as any;
+    const msg = e?.message || e?.error?.message || 'omise error';
+    console.error('Omise error:', JSON.stringify(e, null, 2));
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
