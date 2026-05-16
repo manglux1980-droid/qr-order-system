@@ -45,6 +45,7 @@ export async function POST(req: NextRequest) {
   const { data: codeRes } = await supabase
     .rpc('generate_pickup_code', { p_restaurant_id: qr.restaurant_id });
   const pickupCode = codeRes as string;
+  console.log('Generated pickup code:', pickupCode);
 
   const { data: order, error: oErr } = await supabase
     .from('orders')
@@ -61,7 +62,11 @@ export async function POST(req: NextRequest) {
     .select()
     .single();
 
-  if (oErr) return NextResponse.json({ error: oErr.message }, { status: 500 });
+  if (oErr) {
+    console.error('Order insert failed:', oErr);
+    return NextResponse.json({ error: oErr.message }, { status: 500 });
+  }
+  console.log('Order created:', order.id);
 
   const itemRows = (items as ItemInput[]).map((it) => ({
     order_id: order.id,
@@ -74,7 +79,10 @@ export async function POST(req: NextRequest) {
   }));
 
   const { error: iErr } = await supabase.from('order_items').insert(itemRows);
-  if (iErr) return NextResponse.json({ error: iErr.message }, { status: 500 });
+  if (iErr) {
+    console.error('Order items insert failed:', iErr);
+    return NextResponse.json({ error: iErr.message }, { status: 500 });
+  }
 
   try {
     const amountSatang = Math.round(total * 100);
@@ -85,6 +93,7 @@ export async function POST(req: NextRequest) {
       amount: amountSatang,
       currency: 'thb',
     });
+    console.log('Omise source created:', source.id);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const charge: any = await omise.charges.create({
@@ -98,13 +107,14 @@ export async function POST(req: NextRequest) {
         pickup_code: pickupCode,
       },
     });
+    console.log('Omise charge created:', charge.id);
 
     const qrUrl =
       source.scannable_code?.image?.download_uri ??
       charge.source?.scannable_code?.image?.download_uri ??
       null;
 
-    const { data: payment } = await supabase
+    const { data: payment, error: payErr } = await supabase
       .from('payments')
       .insert({
         session_id: null,
@@ -117,6 +127,15 @@ export async function POST(req: NextRequest) {
       })
       .select()
       .single();
+
+    if (payErr) {
+      console.error('Payment insert failed:', payErr);
+      // Rollback order
+      await supabase.from('order_items').delete().eq('order_id', order.id);
+      await supabase.from('orders').delete().eq('id', order.id);
+      return NextResponse.json({ error: payErr.message }, { status: 500 });
+    }
+    console.log('Payment created:', payment.id, 'gateway_ref:', payment.gateway_ref);
 
     return NextResponse.json({
       order_id: order.id,
