@@ -283,7 +283,7 @@ export default function MenuItemForm({ restaurantId, categories, item, onClose, 
                   {uploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
                   {uploading ? 'กำลังอัพโหลด...' : 'อัพโหลดรูป'}
                 </button>
-                <p className="text-xs text-gray-400 mt-1">JPG, PNG ขนาดไม่เกิน 2MB</p>
+                <p className="text-xs text-gray-400 mt-1">แนะนำ 800×800 px (JPG/PNG, ไม่เกิน 2MB)</p>
               </div>
             </div>
           </div>

@@ -14,7 +14,6 @@ const LOCALES: { key: Locale; label: string }[] = [
   { key: 'ko', label: '🇰🇷 한국어' },
 ]
 
-// Extended category type to include image_url
 type CategoryWithImage = MenuCategory & { image_url?: string | null }
 
 export default function MenuPage() {
@@ -150,11 +149,10 @@ export default function MenuPage() {
                   onClick={() => toggleCategory(cat.id)}
                 >
                   {expanded ? <ChevronUp size={16} className="text-gray-400" /> : <ChevronDown size={16} className="text-gray-400" />}
-                  {/* Category image thumbnail */}
                   <div className="w-10 h-10 rounded-lg bg-gray-100 overflow-hidden flex-shrink-0">
                     {cat.image_url ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={cat.image_url} alt={cat.name_th} className="w-full h-full object-cover" />
+                      <img src={cat.image_url} alt={cat.name_th} className="w-full h-full object-cover object-center" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-lg">📂</div>
                     )}
@@ -197,7 +195,7 @@ export default function MenuPage() {
                       <div className="w-14 h-14 rounded-lg bg-gray-100 overflow-hidden flex-shrink-0">
                         {item.image_url
                           // eslint-disable-next-line @next/next/no-img-element
-                          ? <img src={item.image_url} alt={item.name_th} className="w-full h-full object-cover" />
+                          ? <img src={item.image_url} alt={item.name_th} className="w-full h-full object-cover object-center" />
                           : <div className="w-full h-full flex items-center justify-center text-2xl">🍽️</div>
                         }
                       </div>
@@ -272,7 +270,7 @@ export default function MenuPage() {
 }
 
 // ═══════════════════════════════════════════════════
-// Category Form Modal — 5-language + image upload + AI translate
+// Category Form Modal
 // ═══════════════════════════════════════════════════
 function CategoryFormModal({
   restaurantId,
@@ -391,14 +389,13 @@ function CategoryFormModal({
         </div>
 
         <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
-          {/* Image upload */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">รูปภาพหมวดหมู่</label>
             <div className="flex items-start gap-3">
               <div className="w-24 h-24 rounded-lg bg-gray-100 border border-gray-200 overflow-hidden flex-shrink-0">
                 {imageUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={imageUrl} alt="" className="w-full h-full object-cover" />
+                  <img src={imageUrl} alt="" className="w-full h-full object-cover object-center" />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-3xl">📂</div>
                 )}
@@ -430,12 +427,11 @@ function CategoryFormModal({
                     ลบรูป
                   </button>
                 )}
-                <p className="text-xs text-gray-500 mt-1">JPG, PNG ขนาดไม่เกิน 2MB</p>
+                <p className="text-xs text-gray-500 mt-1">แนะนำ 800×800 px (JPG/PNG, ไม่เกิน 2MB)</p>
               </div>
             </div>
           </div>
 
-          {/* Language tabs + translate button */}
           <div className="flex items-center justify-between gap-2 border-b border-gray-200">
             <div className="flex gap-1 flex-wrap">
               {LOCALES.map(({ key, label }) => {
