@@ -2,46 +2,65 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServiceClient } from '@/lib/supabase/server';
 import crypto from 'crypto';
 
+/**
+ * Omise webhook signature verification.
+ *
+ * Reference: https://docs.omise.co/api-webhooks
+ *
+ * Omise sends:
+ *   Omise-Signature: <hex sig>[,<hex sig>]   (comma-separated during secret rotation)
+ *   Omise-Signature-Timestamp: <unix timestamp>
+ *
+ * The webhook secret is base64-encoded and MUST be decoded to raw bytes
+ * before being used as the HMAC key.
+ *
+ * Signed payload = `${timestamp}.${rawBody}`
+ */
 export async function POST(req: NextRequest) {
   const body = await req.text();
 
-  // ─── Omise signature verification ───
-  // Omise sends:
-  //   omise-signature: <hex hmac-sha256>
-  //   omise-signature-timestamp: <unix timestamp>
-  // Signed payload = `${timestamp}.${body}`
-  const secret = process.env.OMISE_WEBHOOK_SECRET;
-  if (secret) {
-    const signature = req.headers.get('omise-signature') || '';
+  const secretEnv = process.env.OMISE_WEBHOOK_SECRET;
+  if (secretEnv) {
+    const signatureHeader = req.headers.get('omise-signature') || '';
     const timestamp = req.headers.get('omise-signature-timestamp') || '';
 
-    if (!signature || !timestamp) {
+    if (!signatureHeader || !timestamp) {
       console.warn('Missing Omise signature headers');
       return NextResponse.json({ error: 'missing signature' }, { status: 401 });
     }
 
-    // Try multiple signing schemes Omise might use
-    const candidates: string[] = [
-      // Most likely: timestamp.body
-      crypto.createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex'),
-      // Fallback: body only
-      crypto.createHmac('sha256', secret).update(body).digest('hex'),
-      // Fallback: timestamp + body (no separator)
-      crypto.createHmac('sha256', secret).update(`${timestamp}${body}`).digest('hex'),
-    ];
+    // Decode base64-encoded webhook secret to raw bytes
+    const secret = Buffer.from(secretEnv, 'base64');
 
-    const matched = candidates.includes(signature);
+    // Build signed payload: "timestamp.body"
+    const signedPayload = `${timestamp}.${body}`;
+
+    // Compute expected signature as hex
+    const expected = crypto
+      .createHmac('sha256', secret)
+      .update(signedPayload)
+      .digest('hex');
+
+    // Omise-Signature header may contain multiple comma-separated signatures
+    // during secret rotation. Match against any of them.
+    const receivedSignatures = signatureHeader.split(',').map(s => s.trim());
+
+    const matched = receivedSignatures.some(sig => {
+      try {
+        const a = Buffer.from(sig, 'hex');
+        const b = Buffer.from(expected, 'hex');
+        return a.length === b.length && crypto.timingSafeEqual(a, b);
+      } catch {
+        return false;
+      }
+    });
 
     if (!matched) {
-      console.warn('Signature mismatch', {
-        received: signature,
-        expected: candidates,
-        timestamp,
-      });
+      console.warn('Omise signature mismatch', { received: signatureHeader, expected });
       return NextResponse.json({ error: 'invalid signature' }, { status: 401 });
     }
 
-    // Optionally reject very old timestamps (prevent replay)
+    // Reject very old timestamps (prevent replay attacks)
     const ageSeconds = Math.floor(Date.now() / 1000) - parseInt(timestamp, 10);
     if (Number.isFinite(ageSeconds) && ageSeconds > 300) {
       console.warn('Webhook timestamp too old', { ageSeconds });
