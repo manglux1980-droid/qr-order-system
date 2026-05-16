@@ -6,6 +6,8 @@ import { getMenuName, getMenuDesc, getCategoryName, localeNames } from '@/lib/i1
 import type { MenuItem, MenuCategory, Locale } from '@/lib/types'
 import { Globe, Minus, Plus, X, ArrowLeft, ShoppingCart, ChevronRight, Loader2 } from 'lucide-react'
 
+type CategoryWithImage = MenuCategory & { image_url?: string | null }
+
 type OptionGroupItem = {
   id: string
   name_th: string
@@ -66,7 +68,7 @@ export default function PreorderPage({
   const [locale, setLocale] = useState<Locale>('th')
   const [showLangPicker, setShowLangPicker] = useState(false)
 
-  const [categories, setCategories] = useState<MenuCategory[]>([])
+  const [categories, setCategories] = useState<CategoryWithImage[]>([])
   const [items, setItems] = useState<MenuItem[]>([])
   const [optionGroupsByItem, setOptionGroupsByItem] = useState<Record<string, OptionGroup[]>>({})
   const [loading, setLoading] = useState(true)
@@ -140,13 +142,10 @@ export default function PreorderPage({
           .eq('option_groups.is_active', true),
       ])
 
-      setCategories(cats || [])
+      setCategories((cats as CategoryWithImage[]) || [])
       setItems(menuItems || [])
 
-      type LinkRow = {
-        menu_item_id: string
-        option_groups: OptionGroup | OptionGroup[]
-      }
+      type LinkRow = { menu_item_id: string; option_groups: OptionGroup | OptionGroup[] }
       const groupMap: Record<string, OptionGroup[]> = {}
       for (const link of (((links as unknown) as LinkRow[]) ?? [])) {
         const mid = link.menu_item_id
@@ -220,7 +219,6 @@ export default function PreorderPage({
   const cartCount = cart.reduce((s, c) => s + c.quantity, 0)
   const cartTotal = cart.reduce((s, c) => s + c.unitPrice * c.quantity, 0)
 
-  // ─── Submit directly to payment (no customer info needed) ───
   async function submitOrder() {
     if (cart.length === 0) return
     setSubmitting(true)
@@ -278,7 +276,6 @@ export default function PreorderPage({
     </div>
   )
 
-  // ─── Success screen ───
   if (step === 'success' && pickupCode) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-50 to-white flex items-center justify-center p-6">
@@ -316,7 +313,6 @@ export default function PreorderPage({
     )
   }
 
-  // ─── Payment screen ───
   if (step === 'payment') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
@@ -352,7 +348,6 @@ export default function PreorderPage({
     )
   }
 
-  // ─── Option picker ───
   if (step === 'option_picker' && pickingItem) {
     return (
       <OptionPicker
@@ -404,7 +399,6 @@ export default function PreorderPage({
     </div>
   )
 
-  // ─── Categories ───
   if (step === 'categories') {
     return (
       <div className="min-h-screen bg-gray-50 pb-28">
@@ -413,12 +407,13 @@ export default function PreorderPage({
           {categories.map(cat => {
             const catItemsCount = items.filter(it => it.category_id === cat.id).length
             const firstItem = items.find(it => it.category_id === cat.id && it.image_url)
+            const previewImg = cat.image_url || firstItem?.image_url
             return (
               <button key={cat.id} onClick={() => { setActiveCategoryId(cat.id); setStep('items') }} className="bg-white rounded-2xl border-2 border-gray-200 overflow-hidden hover:border-green-400 active:scale-95 transition-all text-left">
                 <div className="aspect-[4/3] bg-gradient-to-br from-green-50 to-green-100">
-                  {firstItem?.image_url ? (
+                  {previewImg ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={firstItem.image_url} alt="" className="w-full h-full object-cover" />
+                    <img src={previewImg} alt="" className="w-full h-full object-cover object-center" />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-5xl">🍽️</div>
                   )}
@@ -450,7 +445,6 @@ export default function PreorderPage({
     )
   }
 
-  // ─── Items ───
   return (
     <div className="min-h-screen bg-gray-50 pb-28">
       {Header}
@@ -467,7 +461,7 @@ export default function PreorderPage({
                 <div className="w-32 h-32 bg-gradient-to-br from-green-50 to-green-100 flex-shrink-0">
                   {item.image_url ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={item.image_url} alt={item.name_th} className="w-full h-full object-cover" />
+                    <img src={item.image_url} alt={item.name_th} className="w-full h-full object-cover object-center" />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-4xl">🍽️</div>
                   )}
@@ -475,7 +469,7 @@ export default function PreorderPage({
                 <div className="flex-1 p-3 flex flex-col justify-between min-w-0">
                   <div>
                     <p className="font-bold text-gray-900 leading-tight">{getMenuName(item as unknown as Record<string, unknown>, locale)}</p>
-                    {item.spicy_level > 0 && <p className="text-xs mt-0.5">{'🌶️'.repeat(item.spicy_level)}</p>}
+                    {item.spicy_level > 0 && (<p className="text-xs mt-0.5">{'🌶️'.repeat(item.spicy_level)}</p>)}
                     {getMenuDesc(item as unknown as Record<string, unknown>, locale) && (
                       <p className="text-xs text-gray-500 mt-1 line-clamp-2">{getMenuDesc(item as unknown as Record<string, unknown>, locale)}</p>
                     )}
@@ -484,7 +478,9 @@ export default function PreorderPage({
                     <div className="bg-green-700 text-white font-bold px-4 py-2 rounded-full text-sm flex items-center gap-2">
                       ฿{item.price.toLocaleString()}
                       {hasOptions ? <ChevronRight size={16} /> : <Plus size={16} />}
-                      {inCart > 0 && <span className="bg-white text-green-700 text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">{inCart}</span>}
+                      {inCart > 0 && (
+                        <span className="bg-white text-green-700 text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">{inCart}</span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -513,9 +509,8 @@ export default function PreorderPage({
 }
 
 // ═══════════════════════════════════════════════════
-// SUB-COMPONENTS
+// Option Picker
 // ═══════════════════════════════════════════════════
-
 function OptionPicker({
   menuItem, groups, locale, t, onCancel, onConfirm,
 }: {
@@ -533,12 +528,15 @@ function OptionPicker({
     if (!obj) return ''
     return getMenuName(obj, locale)
   }
+
   function getOptQty(groupId: string, optionId: string): number {
     return selections[groupId]?.[optionId] ?? 0
   }
+
   function setSingleSelect(group: OptionGroup, optionId: string) {
     setSelections(prev => ({ ...prev, [group.id]: { [optionId]: 1 } }))
   }
+
   function changeMultiQty(groupId: string, optionId: string, delta: number) {
     setSelections(prev => {
       const cur = prev[groupId] ?? {}
@@ -551,6 +549,7 @@ function OptionPicker({
       return { ...prev, [groupId]: { ...cur, [optionId]: next } }
     })
   }
+
   function canConfirm(): boolean {
     for (const g of groups) {
       if (g.is_required) {
@@ -560,6 +559,7 @@ function OptionPicker({
     }
     return true
   }
+
   let optDelta = 0
   for (const g of groups) {
     const sel = selections[g.id] ?? {}
@@ -599,39 +599,39 @@ function OptionPicker({
         <h1 className="font-bold text-gray-900 flex-1 truncate">{getMenuName(menuItem as unknown as Record<string, unknown>, locale)}</h1>
         <span className="font-bold text-green-700">฿{menuItem.price.toLocaleString()}</span>
       </div>
+
       {menuItem.image_url && (
         <div className="px-4 pt-4">
           <div className="w-32 h-32 mx-auto rounded-2xl overflow-hidden bg-gray-100">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={menuItem.image_url} alt="" className="w-full h-full object-cover" />
+            <img src={menuItem.image_url} alt="" className="w-full h-full object-cover object-center" />
           </div>
         </div>
       )}
+
       <div className="px-4 py-4 space-y-5">
         {groups.map(group => {
           const groupName = getName(group as unknown as Record<string, unknown>)
           return (
             <div key={group.id}>
               <div className="mb-3">
-                <h2 className="font-bold text-gray-900">
-                  {groupName}
-                  {group.is_required && <span className="text-red-500 ml-1">*</span>}
-                </h2>
+                <h2 className="font-bold text-gray-900">{groupName}{group.is_required && <span className="text-red-500 ml-1">*</span>}</h2>
                 {group.selection_type === 'multi' && (
                   <p className="text-xs text-gray-500">{t('เลือกได้หลายอย่าง', 'Choose multiple', '可多选', '複数選択可', '여러 선택 가능')}</p>
                 )}
               </div>
+
               <div className="space-y-2">
                 {group.option_group_items.map(opt => {
                   const optName = getName(opt as unknown as Record<string, unknown>)
                   const qty = getOptQty(group.id, opt.id)
                   const selected = qty > 0
                   return (
-                    <div key={opt.id} className={`flex items-center gap-3 p-2 bg-white rounded-xl border-2 transition-colors ${selected ? 'border-green-500' : 'border-gray-200'}`}>
+                    <div key={opt.id} className={`flex items-center gap-3 p-2 bg-white rounded-xl border-2 ${selected ? 'border-green-500' : 'border-gray-200'}`}>
                       <div className="w-14 h-14 rounded-lg bg-gray-100 overflow-hidden flex-shrink-0">
                         {opt.image_url ? (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img src={opt.image_url} alt="" className="w-full h-full object-cover" />
+                          <img src={opt.image_url} alt="" className="w-full h-full object-cover object-center" />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-2xl">🍽️</div>
                         )}
@@ -664,29 +664,35 @@ function OptionPicker({
             </div>
           )
         })}
+
         <div>
           <h2 className="font-bold text-gray-900 mb-2">{t('ความต้องการพิเศษเพิ่มเติม', 'Special requests', '特殊要求', '特別なご要望', '특별 요청')}</h2>
-          <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 resize-none" />
+          <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder={t('เช่น ไม่ใส่ผัก', 'e.g. no veggies', '例:不要蔬菜', '例: 野菜なし', '예: 채소 빼고')} rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 placeholder-gray-400 resize-none" />
         </div>
       </div>
+
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 px-4 py-3 flex gap-2">
         <button onClick={onCancel} className="px-5 py-3 rounded-full border-2 border-green-700 text-green-700 font-semibold">
           {t('ยกเลิก', 'Cancel', '取消', 'キャンセル', '취소')}
         </button>
         <button onClick={confirm} disabled={!canConfirm()} className="flex-1 py-3 rounded-full bg-green-700 hover:bg-green-800 disabled:bg-gray-300 text-white font-bold">
-          {t('เพิ่มเข้าตะกร้า', 'Add to Cart', '加入购物车', 'カートに追加', '장바구니')} · ฿{totalPrice.toLocaleString()}
+          {t('เพิ่มเข้าตะกร้า', 'Add to Cart', '加入购物车', 'カートに追加', '장바구니에 추가')} · ฿{totalPrice.toLocaleString()}
         </button>
       </div>
     </div>
   )
 }
 
+// ═══════════════════════════════════════════════════
+// Cart Drawer
+// ═══════════════════════════════════════════════════
 function CartDrawer({
   cart, cartTotal, locale, t, submitting,
   onClose, onUpdateQty, onRemove, onContinue, onSubmit,
 }: {
-  cart: CartItem[]; cartTotal: number; locale: Locale; submitting: boolean
+  cart: CartItem[]; cartTotal: number; locale: Locale
   t: (th: string, en: string, zh: string, ja: string, ko: string) => string
+  submitting: boolean
   onClose: () => void
   onUpdateQty: (id: string, delta: number) => void
   onRemove: (id: string) => void
@@ -701,9 +707,10 @@ function CartDrawer({
           <h2 className="font-bold text-gray-900">{t('ตะกร้าของฉัน', 'My Cart', '我的购物车', 'マイカート', '내 장바구니')}</h2>
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-lg"><X size={20} /></button>
         </div>
+
         <div className="overflow-y-auto flex-1 px-5 py-3 space-y-3">
           {cart.length === 0 ? (
-            <p className="text-center text-gray-400 py-8 text-sm">{t('ตะกร้าว่างเปล่า', 'Empty', '空', '空', '비어 있음')}</p>
+            <p className="text-center text-gray-400 py-8 text-sm">{t('ตะกร้าว่างเปล่า', 'Cart is empty', '购物车为空', 'カートは空', '장바구니 비어 있음')}</p>
           ) : cart.map(c => (
             <div key={c.cartId} className="border border-gray-100 rounded-xl p-3">
               <div className="flex items-start gap-3">
@@ -733,6 +740,7 @@ function CartDrawer({
             </div>
           ))}
         </div>
+
         <div className="px-5 py-4 border-t border-gray-100">
           <div className="flex justify-between mb-3">
             <span className="text-gray-700 font-medium">Total</span>
@@ -740,12 +748,12 @@ function CartDrawer({
           </div>
           <div className="flex gap-2">
             <button onClick={onContinue} className="flex-1 py-3 rounded-full border-2 border-green-700 text-green-700 font-semibold text-sm">
-              {t('สั่งเพิ่ม', 'Add more', '继续点餐', '追加', '추가')}
+              {t('สั่งเพิ่ม', 'Add more', '继续点餐', '追加注文', '추가 주문')}
             </button>
-            <button onClick={onSubmit} disabled={submitting || cart.length === 0} className="flex-1 py-3 rounded-full bg-green-700 disabled:bg-gray-300 text-white font-bold text-sm">
+            <button onClick={onSubmit} disabled={submitting || cart.length === 0} className="flex-1 py-3 rounded-full bg-green-700 hover:bg-green-800 disabled:bg-gray-300 text-white font-bold text-sm">
               {submitting
-                ? t('กำลังส่ง...', 'Sending...', '提交中...', '送信中...', '전송 중...')
-                : t('ชำระเงิน', 'Pay Now', '付款', 'お支払い', '결제')}
+                ? t('กำลังส่ง...', 'Sending...', '发送中...', '送信中...', '전송 중...')
+                : t('ชำระเงิน', 'Pay Now', '立即付款', '支払う', '결제')}
             </button>
           </div>
         </div>

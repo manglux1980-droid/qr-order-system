@@ -7,6 +7,8 @@ import type { MenuItem, MenuCategory, Locale } from '@/lib/types'
 import { Globe, Minus, Plus, X, ArrowLeft, ShoppingCart, ChevronRight } from 'lucide-react'
 import PaymentModal from '@/components/customer/PaymentModal'
 
+type CategoryWithImage = MenuCategory & { image_url?: string | null }
+
 function getOrCreateDeviceId(): string {
   if (typeof window === 'undefined') return ''
   let id = localStorage.getItem('device_id')
@@ -17,7 +19,6 @@ function getOrCreateDeviceId(): string {
   return id
 }
 
-// ─── Types ───
 type OptionGroupItem = {
   id: string
   name_th: string
@@ -47,16 +48,16 @@ type SelectedOption = {
   option_id: string
   option_name: string
   price_delta: number
-  quantity: number  // for multi-select +/- counter (single is always 1)
+  quantity: number
 }
 
 type CartItem = {
-  cartId: string  // unique per cart line
+  cartId: string
   menuItem: MenuItem
   quantity: number
   selectedOptions: SelectedOption[]
   note?: string
-  unitPrice: number  // base price + sum of options
+  unitPrice: number
 }
 
 type SubmittedItem = {
@@ -77,34 +78,28 @@ export default function CustomerMenuPage({
   const { slug, tableToken } = use(params)
   const supabase = createClient()
 
-  // ─── i18n ───
   const [locale, setLocale] = useState<Locale>('th')
   const [showLangPicker, setShowLangPicker] = useState(false)
 
-  // ─── Data ───
-  const [categories, setCategories] = useState<MenuCategory[]>([])
+  const [categories, setCategories] = useState<CategoryWithImage[]>([])
   const [items, setItems] = useState<MenuItem[]>([])
   const [optionGroupsByItem, setOptionGroupsByItem] = useState<Record<string, OptionGroup[]>>({})
   const [loading, setLoading] = useState(true)
   const [restaurantName, setRestaurantName] = useState('')
 
-  // ─── Session ───
   const [session, setSession] = useState<{ id: string; status?: string } | null>(null)
   const [order, setOrder] = useState<{ id: string } | null>(null)
   const [table, setTable] = useState<{ table_number: number; label: string | null } | null>(null)
 
-  // ─── Navigation state ───
   const [step, setStep] = useState<Step>('categories')
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null)
   const [pickingItem, setPickingItem] = useState<MenuItem | null>(null)
 
-  // ─── Cart ───
   const [cart, setCart] = useState<CartItem[]>([])
   const [showCart, setShowCart] = useState(false)
   const [showBill, setShowBill] = useState(false)
   const [showSuccess, setShowSuccess] = useState(false)
 
-  // ─── Bill (from server) ───
   const [submittedItems, setSubmittedItems] = useState<SubmittedItem[]>([])
   const [billTotal, setBillTotal] = useState(0)
   const [sessionStatus, setSessionStatus] = useState<string>('open')
@@ -112,11 +107,9 @@ export default function CustomerMenuPage({
   const [paidAmount, setPaidAmount] = useState(0)
   const [requestingBill, setRequestingBill] = useState(false)
 
-  // ─── QR payment ───
   const [showPayment, setShowPayment] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
-  // ─── i18n detect ───
   useEffect(() => {
     const lang = navigator.language.toLowerCase()
     if (lang.startsWith('zh')) setLocale('zh')
@@ -126,7 +119,6 @@ export default function CustomerMenuPage({
     else setLocale('en')
   }, [])
 
-  // ─── Init ───
   useEffect(() => { init() }, [slug, tableToken])
 
   async function init() {
@@ -174,10 +166,9 @@ export default function CustomerMenuPage({
           .eq('option_groups.is_active', true),
       ])
 
-      setCategories(cats || [])
+      setCategories((cats as CategoryWithImage[]) || [])
       setItems(menuItems || [])
 
-      // Group option groups by menu_item_id
       const groupMap: Record<string, OptionGroup[]> = {}
       type LinkRow = {
         menu_item_id: string
@@ -187,7 +178,6 @@ export default function CustomerMenuPage({
       for (const link of ((links as unknown) as LinkRow[] ?? [])) {
         const mid = link.menu_item_id
         if (!groupMap[mid]) groupMap[mid] = []
-        // Sort items inside group by sort_order
         const g = link.option_groups
         g.option_group_items = (g.option_group_items ?? []).sort((a, b) =>
           // @ts-expect-error sort_order is defined on option_group_items but not in type
@@ -200,7 +190,6 @@ export default function CustomerMenuPage({
     setLoading(false)
   }
 
-  // ─── Refresh bill ───
   const refreshBill = useCallback(async () => {
     if (!session?.id) return
     const { data: sess } = await supabase
@@ -295,18 +284,11 @@ export default function CustomerMenuPage({
     return () => { supabase.removeChannel(channel) }
   }, [session?.id, refreshBill, supabase])
 
-  // ─── Helpers ───
   const t = (th: string, en: string, zh: string, ja: string, ko: string) => {
     const map: Record<Locale, string> = { th, en, zh, ja, ko }
     return map[locale] || th
   }
 
-  function getName(obj: Record<string, unknown> | null | undefined): string {
-    if (!obj) return ''
-    return getMenuName(obj, locale)
-  }
-
-  // ─── Add to cart (called from option picker) ───
   function addToCart(menuItem: MenuItem, selectedOptions: SelectedOption[], note: string) {
     const optDelta = selectedOptions.reduce((s, o) => s + o.price_delta * o.quantity, 0)
     const unitPrice = menuItem.price + optDelta
@@ -333,15 +315,12 @@ export default function CustomerMenuPage({
     setCart(prev => prev.filter(c => c.cartId !== cartId))
   }
 
-  // For items WITHOUT options - quick add (no picker)
   function quickAddItem(item: MenuItem) {
     const groups = optionGroupsByItem[item.id] ?? []
     if (groups.length > 0) {
-      // Has options → open picker
       setPickingItem(item)
       setStep('option_picker')
     } else {
-      // No options → add directly
       addToCart(item, [], '')
     }
   }
@@ -349,14 +328,13 @@ export default function CustomerMenuPage({
   const cartCount = cart.reduce((s, c) => s + c.quantity, 0)
   const cartTotal = cart.reduce((s, c) => s + c.unitPrice * c.quantity, 0)
 
-  // ─── Submit cart to kitchen ───
   async function submitToKitchen() {
     if (!order || !cart.length) return
     setSubmitting(true)
     const items = cart.map(c => ({
       menu_item_id: c.menuItem.id,
       quantity: c.quantity,
-      price_snapshot: c.menuItem.price,  // base price; options stored separately
+      price_snapshot: c.menuItem.price,
       note: c.note || null,
       options_snapshot: c.selectedOptions.map(o => ({
         group_id: o.group_id,
@@ -411,7 +389,6 @@ export default function CustomerMenuPage({
     refreshBill()
   }
 
-  // ─── Loading ───
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="text-center">
@@ -421,7 +398,6 @@ export default function CustomerMenuPage({
     </div>
   )
 
-  // ─── Session closed (paid) ───
   if (sessionClosed) {
     return <ThankYouScreen paidAmount={paidAmount} table={table} t={t} />
   }
@@ -430,7 +406,6 @@ export default function CustomerMenuPage({
   const activeCategory = categories.find(c => c.id === activeCategoryId)
   const categoryItems = items.filter(it => it.category_id === activeCategoryId)
 
-  // ─── STEP 3: Option Picker (full-screen) ───
   if (step === 'option_picker' && pickingItem) {
     return (
       <OptionPicker
@@ -444,7 +419,6 @@ export default function CustomerMenuPage({
     )
   }
 
-  // ─── Header (shared between steps 1 & 2) ───
   const Header = (
     <div className="sticky top-0 z-30 bg-white border-b border-gray-200 shadow-sm">
       <div className="px-4 py-3">
@@ -502,7 +476,6 @@ export default function CustomerMenuPage({
         </div>
       </div>
 
-      {/* Bill request banner */}
       {isPaying && (
         <div className="mx-4 mb-3 p-3 bg-orange-50 border-2 border-orange-300 rounded-xl">
           <div className="flex items-center gap-2">
@@ -519,7 +492,6 @@ export default function CustomerMenuPage({
     </div>
   )
 
-  // ─── STEP 1: Categories Grid ───
   if (step === 'categories') {
     return (
       <div className="min-h-screen bg-gray-50 pb-28">
@@ -529,7 +501,7 @@ export default function CustomerMenuPage({
           {categories.map(cat => {
             const catItemsCount = items.filter(it => it.category_id === cat.id).length
             const firstItem = items.find(it => it.category_id === cat.id && it.image_url)
-            const previewImg = firstItem?.image_url
+            const previewImg = cat.image_url || firstItem?.image_url
             return (
               <button
                 key={cat.id}
@@ -539,7 +511,7 @@ export default function CustomerMenuPage({
                 <div className="aspect-[4/3] bg-gradient-to-br from-green-50 to-green-100 relative">
                   {previewImg ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={previewImg} alt="" className="w-full h-full object-cover" />
+                    <img src={previewImg} alt="" className="w-full h-full object-cover object-center" />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-5xl">🍽️</div>
                   )}
@@ -572,7 +544,6 @@ export default function CustomerMenuPage({
           t={t}
         />
 
-        {/* Cart / Bill drawers */}
         {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={submitToKitchen} submitting={submitting} />}
         {showBill && <BillDrawer table={table} submittedItems={submittedItems} billTotal={billTotal} isPaying={isPaying} requestingBill={requestingBill} t={t} onClose={() => setShowBill(false)} onRequestBill={requestBill} onCancelRequest={cancelBillRequest} onPayQr={() => { setShowBill(false); setShowPayment(true) }} />}
         {showSuccess && <SuccessOverlay t={t} onShowBill={() => { setShowSuccess(false); setShowBill(true) }} onContinue={() => setShowSuccess(false)} />}
@@ -583,7 +554,6 @@ export default function CustomerMenuPage({
     )
   }
 
-  // ─── STEP 2: Items in Category ───
   return (
     <div className="min-h-screen bg-gray-50 pb-28">
       {Header}
@@ -608,7 +578,7 @@ export default function CustomerMenuPage({
                 <div className="w-32 h-32 bg-gradient-to-br from-green-50 to-green-100 flex-shrink-0">
                   {item.image_url ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={item.image_url} alt={item.name_th} className="w-full h-full object-cover" />
+                    <img src={item.image_url} alt={item.name_th} className="w-full h-full object-cover object-center" />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-4xl">🍽️</div>
                   )}
@@ -702,7 +672,6 @@ function FloatingButtons({ cartCount, cartTotal, billTotal, onShowCart, onShowBi
   )
 }
 
-// ─── Option Picker (full-screen) ───
 function OptionPicker({
   menuItem,
   groups,
@@ -718,7 +687,6 @@ function OptionPicker({
   onCancel: () => void
   onConfirm: (opts: SelectedOption[], note: string) => void
 }) {
-  // selections[group_id] = { [option_id]: quantity }
   const [selections, setSelections] = useState<Record<string, Record<string, number>>>({})
   const [note, setNote] = useState('')
 
@@ -740,7 +708,6 @@ function OptionPicker({
       const cur = prev[groupId] ?? {}
       const next = (cur[optionId] ?? 0) + delta
       if (next <= 0) {
-        // remove
         const { [optionId]: _, ...rest } = cur
         void _
         return { ...prev, [groupId]: rest }
@@ -749,7 +716,6 @@ function OptionPicker({
     })
   }
 
-  // Validate required
   function canConfirm(): boolean {
     for (const g of groups) {
       if (g.is_required) {
@@ -760,7 +726,6 @@ function OptionPicker({
     return true
   }
 
-  // Compute total
   let optDelta = 0
   for (const g of groups) {
     const sel = selections[g.id] ?? {}
@@ -803,12 +768,11 @@ function OptionPicker({
         <span className="font-bold text-green-700">฿{menuItem.price.toLocaleString()}</span>
       </div>
 
-      {/* Hero image */}
       {menuItem.image_url && (
         <div className="px-4 pt-4">
           <div className="w-32 h-32 mx-auto rounded-2xl overflow-hidden bg-gray-100">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={menuItem.image_url} alt="" className="w-full h-full object-cover" />
+            <img src={menuItem.image_url} alt="" className="w-full h-full object-cover object-center" />
           </div>
         </div>
       )}
@@ -841,11 +805,10 @@ function OptionPicker({
                       key={opt.id}
                       className={`flex items-center gap-3 p-2 bg-white rounded-xl border-2 transition-colors ${selected ? 'border-green-500' : 'border-gray-200'}`}
                     >
-                      {/* Image */}
                       <div className="w-14 h-14 rounded-lg bg-gray-100 overflow-hidden flex-shrink-0">
                         {opt.image_url ? (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img src={opt.image_url} alt="" className="w-full h-full object-cover" />
+                          <img src={opt.image_url} alt="" className="w-full h-full object-cover object-center" />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-2xl">🍽️</div>
                         )}
@@ -860,7 +823,6 @@ function OptionPicker({
                         )}
                       </div>
 
-                      {/* Selector */}
                       {group.selection_type === 'single' ? (
                         <button
                           onClick={() => setSingleSelect(group, opt.id)}
@@ -894,7 +856,6 @@ function OptionPicker({
           )
         })}
 
-        {/* Special request */}
         <div>
           <h2 className="font-bold text-gray-900 mb-2">
             {t('ความต้องการพิเศษเพิ่มเติม', 'Special requests', '特殊要求', '特別なご要望', '특별 요청')}
@@ -909,7 +870,6 @@ function OptionPicker({
         </div>
       </div>
 
-      {/* Bottom action */}
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 px-4 py-3 flex gap-2">
         <button
           onClick={onCancel}
@@ -929,7 +889,6 @@ function OptionPicker({
   )
 }
 
-// ─── Cart Drawer ───
 function CartDrawer({
   cart, cartTotal, locale, t,
   onClose, onUpdateQty, onRemove, onContinue, onSubmit, submitting,
@@ -1014,7 +973,6 @@ function CartDrawer({
   )
 }
 
-// ─── Bill Drawer (table-wide bill, all submitted) ───
 function BillDrawer({
   table, submittedItems, billTotal, isPaying, requestingBill, t,
   onClose, onRequestBill, onCancelRequest, onPayQr,
@@ -1109,14 +1067,13 @@ function BillDrawer({
   )
 }
 
-// ─── Success overlay (after sending order to kitchen) ───
 function SuccessOverlay({ t, onShowBill, onContinue }: {
   t: (th: string, en: string, zh: string, ja: string, ko: string) => string
   onShowBill: () => void
   onContinue: () => void
 }) {
   useEffect(() => {
-    const timer = setTimeout(() => onContinue(), 8000)  // auto-dismiss after 8s
+    const timer = setTimeout(() => onContinue(), 8000)
     return () => clearTimeout(timer)
   }, [onContinue])
 
@@ -1147,7 +1104,6 @@ function SuccessOverlay({ t, onShowBill, onContinue }: {
   )
 }
 
-// ─── Thank you (after paid) ───
 function ThankYouScreen({ paidAmount, table, t }: {
   paidAmount: number
   table: { table_number: number; label: string | null } | null
@@ -1176,7 +1132,7 @@ function ThankYouScreen({ paidAmount, table, t }: {
           <p className="text-xs text-gray-400 mb-6">{t('โต๊ะ', 'Table', '桌', 'テーブル', '테이블')} #{table.table_number}</p>
         )}
         <button onClick={() => window.location.reload()} className="w-full px-6 py-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl font-semibold">
-          {t('สั่งใหม่', 'Order Again', '再次点餐', 'もう一度注文', '다시 주문')}
+          {t('สั่งใหม่', 'Order Again', '再次点餐', 'もう一度注문', '다시 주문')}
         </button>
       </div>
     </div>
