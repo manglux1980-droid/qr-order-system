@@ -249,7 +249,6 @@ export default function MenuPage() {
           restaurantId={restaurantId}
           categories={categories}
           item={editingItem}
-          // @ts-expect-error optional prop
           presetCategoryId={presetCategoryId}
           onClose={() => { setShowForm(false); setPresetCategoryId(null) }}
           onSaved={() => { setShowForm(false); setPresetCategoryId(null); loadData() }}

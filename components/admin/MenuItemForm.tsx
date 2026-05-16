@@ -23,6 +23,7 @@ interface Props {
   restaurantId: string
   categories: MenuCategory[]
   item: MenuItem | null
+  presetCategoryId?: string | null
   onClose: () => void
   onSaved: () => void
 }
@@ -46,7 +47,7 @@ type OptionGroupLite = {
   option_group_items: Array<{ name_th: string; price_delta: number }>
 }
 
-export default function MenuItemForm({ restaurantId, categories, item, onClose, onSaved }: Props) {
+export default function MenuItemForm({ restaurantId, categories, item, presetCategoryId, onClose, onSaved }: Props) {
   const supabase = createClient()
   const fileRef = useRef<HTMLInputElement>(null)
   const [activeLocale, setActiveLocale] = useState<Locale>('th')
@@ -55,7 +56,7 @@ export default function MenuItemForm({ restaurantId, categories, item, onClose, 
   const [uploading, setUploading] = useState(false)
 
   const [form, setForm] = useState<FormData>({
-    category_id: categories[0]?.id || '',
+    category_id: presetCategoryId || categories[0]?.id || '',
     price: '',
     spicy_level: 0,
     is_available: true,
