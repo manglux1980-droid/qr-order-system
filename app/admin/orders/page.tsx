@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
 type OptionSnap = {
@@ -29,7 +29,6 @@ type KdsOrder = {
   items: OrderItem[];
 };
 
-// ─── Raw row type from Supabase (menu_items and tables can be array or object) ───
 type RawItem = {
   id: string;
   quantity: number;
@@ -64,8 +63,45 @@ export default function OrdersKdsPage() {
   const [soundOn, setSoundOn] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'dine_in' | 'preorder'>('all');
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const audioUnlockedRef = useRef(false);
+  const ordersRef = useRef<KdsOrder[]>([]);
 
   const supabase = createClient();
+
+  // Keep ref in sync with state
+  useEffect(() => { ordersRef.current = orders; }, [orders]);
+
+  // Unlock audio on first user gesture
+  const unlockAudio = useCallback(() => {
+    if (audioUnlockedRef.current) return;
+    try {
+      if (!audioCtxRef.current) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const AC = window.AudioContext || (window as any).webkitAudioContext;
+        audioCtxRef.current = new AC();
+      }
+      const ctx = audioCtxRef.current!;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      const u = new SpeechSynthesisUtterance('');
+      speechSynthesis.speak(u);
+
+      audioUnlockedRef.current = true;
+    } catch (e) {
+      console.warn('Audio unlock failed:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handler = () => unlockAudio();
+    window.addEventListener('click', handler);
+    window.addEventListener('keydown', handler);
+    return () => {
+      window.removeEventListener('click', handler);
+      window.removeEventListener('keydown', handler);
+    };
+  }, [unlockAudio]);
 
   const load = useCallback(async () => {
     const { data } = await supabase
@@ -113,29 +149,17 @@ export default function OrdersKdsPage() {
     setLoading(false);
   }, [supabase]);
 
-  useEffect(() => {
-    load();
-    const channel = supabase
-      .channel('kds-orders')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
-        if (
-          payload.eventType === 'UPDATE' &&
-          (payload.new as { status?: string }).status === 'confirmed' &&
-          (payload.old as { status?: string }).status !== 'confirmed' &&
-          soundOn
-        ) {
-          playDing();
-        }
-        load();
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, () => load())
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [load, supabase, soundOn]);
-
-  function playDing() {
+  function playDing(orderId?: string) {
+    if (!audioUnlockedRef.current) {
+      console.warn('Audio not unlocked yet');
+      return;
+    }
     try {
-      const ctx = new AudioContext();
+      const ctx = audioCtxRef.current;
+      if (!ctx) return;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      // Ding sound
       [600, 900].forEach((freq, i) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
@@ -147,13 +171,67 @@ export default function OrdersKdsPage() {
         osc.start(ctx.currentTime + i * 0.18);
         osc.stop(ctx.currentTime + i * 0.18 + 0.2);
       });
-      try {
-        const u = new SpeechSynthesisUtterance('ออเดอร์ใหม่');
-        u.lang = 'th-TH';
-        speechSynthesis.speak(u);
-      } catch {}
-    } catch {}
+
+      // Verbose speech with table + items
+      setTimeout(() => {
+        try {
+          speechSynthesis.cancel();
+          const order = ordersRef.current.find(o => o.id === orderId);
+          let text = 'ออเดอร์ใหม่';
+          if (order) {
+            if (order.order_type === 'preorder') {
+              text = `สั่งล่วงหน้า รหัส ${order.pickup_code ?? ''}`;
+            } else if (order.table_number) {
+              text = `ออเดอร์ใหม่ โต๊ะ ${order.table_number}`;
+            }
+            // Add first 2 items
+            const itemNames = order.items.slice(0, 2).map(it =>
+              it.quantity > 1 ? `${it.name_th} ${it.quantity} ที่` : it.name_th
+            );
+            if (itemNames.length > 0) {
+              text += ' ' + itemNames.join(' ');
+              if (order.items.length > 2) text += ' และอื่นๆ';
+            }
+          }
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = 'th-TH';
+          u.rate = 1.0;
+          u.volume = 1.0;
+          speechSynthesis.speak(u);
+        } catch (e) {
+          console.warn('Speech failed:', e);
+        }
+      }, 400);
+    } catch (e) {
+      console.warn('playDing failed:', e);
+    }
   }
+
+  useEffect(() => {
+    load();
+    const channel = supabase
+      .channel('kds-orders')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
+        if (
+          payload.eventType === 'UPDATE' &&
+          (payload.new as { status?: string }).status === 'confirmed' &&
+          (payload.old as { status?: string }).status !== 'confirmed' &&
+          soundOn
+        ) {
+          const orderId = (payload.new as { id: string }).id;
+          // Load first, then play (so we have updated data)
+          load().then(() => {
+            setTimeout(() => playDing(orderId), 200);
+          });
+          return;
+        }
+        load();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, () => load())
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load, supabase, soundOn]);
 
   async function markServed(orderId: string) {
     setUpdating(orderId);
@@ -195,12 +273,21 @@ export default function OrdersKdsPage() {
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">ออเดอร์ (KDS)</h1>
         <button
-          onClick={() => setSoundOn((s) => !s)}
+          onClick={() => {
+            setSoundOn((s) => !s);
+            unlockAudio();
+          }}
           className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
         >
           {soundOn ? '🔊' : '🔇'}
         </button>
       </div>
+
+      {!audioUnlockedRef.current && soundOn && (
+        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
+          👆 คลิกที่ใดก็ได้บนหน้านี้ครั้งแรกเพื่อเปิดใช้งานเสียง (กฎของ browser)
+        </div>
+      )}
 
       <div className="flex gap-2 mb-6">
         <button onClick={() => setFilter('all')} className={`px-4 py-2 rounded-lg text-sm font-medium ${filter === 'all' ? 'bg-gray-900 text-white' : 'bg-white border border-gray-300'}`}>

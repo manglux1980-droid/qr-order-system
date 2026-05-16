@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
 type BillItem = {
@@ -29,8 +29,43 @@ export default function CashierPage() {
   const [selected, setSelected] = useState<CashierSession | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [soundOn, setSoundOn] = useState(true);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const audioUnlockedRef = useRef(false);
 
   const supabase = createClient();
+
+  // Unlock audio context on first user interaction (autoplay policy)
+  const unlockAudio = useCallback(() => {
+    if (audioUnlockedRef.current) return;
+    try {
+      if (!audioCtxRef.current) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const AC = window.AudioContext || (window as any).webkitAudioContext;
+        audioCtxRef.current = new AC();
+      }
+      const ctx = audioCtxRef.current!;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      // Trigger speechSynthesis with empty utterance to unlock it
+      const u = new SpeechSynthesisUtterance('');
+      speechSynthesis.speak(u);
+
+      audioUnlockedRef.current = true;
+    } catch (e) {
+      console.warn('Audio unlock failed:', e);
+    }
+  }, []);
+
+  // Unlock on first click anywhere
+  useEffect(() => {
+    const handler = () => unlockAudio();
+    window.addEventListener('click', handler, { once: false });
+    window.addEventListener('keydown', handler, { once: false });
+    return () => {
+      window.removeEventListener('click', handler);
+      window.removeEventListener('keydown', handler);
+    };
+  }, [unlockAudio]);
 
   const load = useCallback(async () => {
     const res = await fetch('/api/cashier/sessions');
@@ -46,29 +81,17 @@ export default function CashierPage() {
     setLoading(false);
   }, []);
 
-  useEffect(() => {
-    load();
-    const channel = supabase
-      .channel('cashier-sessions')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'table_sessions' }, (payload) => {
-        if (
-          payload.eventType === 'UPDATE' &&
-          (payload.new as { status?: string }).status === 'paying' &&
-          (payload.old as { status?: string }).status !== 'paying' &&
-          soundOn
-        ) {
-          playDing();
-        }
-        load();
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, () => load())
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [load, supabase, soundOn]);
-
-  function playDing() {
+  function playDing(tableNumber?: number, amount?: number) {
+    if (!audioUnlockedRef.current) {
+      console.warn('Audio not unlocked yet — user needs to click first');
+      return;
+    }
     try {
-      const ctx = new AudioContext();
+      const ctx = audioCtxRef.current;
+      if (!ctx) return;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      // Ding sound
       [880, 660].forEach((freq, i) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
@@ -80,13 +103,52 @@ export default function CashierPage() {
         osc.start(ctx.currentTime + i * 0.2);
         osc.stop(ctx.currentTime + i * 0.2 + 0.25);
       });
-      try {
-        const u = new SpeechSynthesisUtterance('ขอจ่ายเงิน');
-        u.lang = 'th-TH';
-        speechSynthesis.speak(u);
-      } catch {}
-    } catch {}
+
+      // Speech — verbose with table + amount
+      setTimeout(() => {
+        try {
+          speechSynthesis.cancel(); // clear queue
+          let text = 'โต๊ะ';
+          if (tableNumber) text += ` ${tableNumber}`;
+          text += ' ขอจ่ายเงิน';
+          if (amount) text += ` ${Math.round(amount)} บาท`;
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = 'th-TH';
+          u.rate = 1.0;
+          u.volume = 1.0;
+          speechSynthesis.speak(u);
+        } catch (e) {
+          console.warn('Speech failed:', e);
+        }
+      }, 500);
+    } catch (e) {
+      console.warn('playDing failed:', e);
+    }
   }
+
+  useEffect(() => {
+    load();
+    const channel = supabase
+      .channel('cashier-sessions')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'table_sessions' }, (payload) => {
+        if (
+          payload.eventType === 'UPDATE' &&
+          (payload.new as { status?: string }).status === 'paying' &&
+          (payload.old as { status?: string }).status !== 'paying' &&
+          soundOn
+        ) {
+          // Get table number + amount from current sessions state
+          const sessionId = (payload.new as { id: string }).id;
+          const sess = sessions.find(s => s.session_id === sessionId);
+          playDing(sess?.table_number, sess?.total);
+        }
+        load();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, () => load())
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load, supabase, soundOn]);
 
   async function checkout(session: CashierSession) {
     if (!window.confirm(`รับเงิน ฿${session.total.toFixed(2)} จากโต๊ะ #${session.table_number}?`)) return;
@@ -120,10 +182,22 @@ export default function CashierPage() {
     <div className="p-6 max-w-6xl mx-auto text-gray-900">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">แคชเชียร์</h1>
-        <button onClick={() => setSoundOn((s) => !s)} className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
+        <button
+          onClick={() => {
+            setSoundOn((s) => !s);
+            unlockAudio();
+          }}
+          className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
+        >
           {soundOn ? '🔊 เสียงเปิด' : '🔇 เสียงปิด'}
         </button>
       </div>
+
+      {!audioUnlockedRef.current && soundOn && (
+        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
+          👆 คลิกที่ใดก็ได้บนหน้านี้ครั้งแรกเพื่อเปิดใช้งานเสียง (กฎของ browser)
+        </div>
+      )}
 
       {loading && <div className="text-gray-600">กำลังโหลด...</div>}
 
