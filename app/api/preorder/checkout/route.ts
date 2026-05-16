@@ -79,7 +79,6 @@ export async function POST(req: NextRequest) {
   try {
     const amountSatang = Math.round(total * 100);
 
-    // ─── Step 1: Create source for PromptPay ───
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const source: any = await (omise as any).sources.create({
       type: 'promptpay',
@@ -87,7 +86,6 @@ export async function POST(req: NextRequest) {
       currency: 'thb',
     });
 
-    // ─── Step 2: Create charge using source id ───
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const charge: any = await omise.charges.create({
       amount: amountSatang,
@@ -101,6 +99,11 @@ export async function POST(req: NextRequest) {
       },
     });
 
+    const qrUrl =
+      source.scannable_code?.image?.download_uri ??
+      charge.source?.scannable_code?.image?.download_uri ??
+      null;
+
     const { data: payment } = await supabase
       .from('payments')
       .insert({
@@ -109,16 +112,11 @@ export async function POST(req: NextRequest) {
         method: 'promptpay',
         amount: total,
         status: 'pending',
-        omise_charge_id: charge.id,
+        gateway_ref: charge.id,
+        qr_image_url: qrUrl,
       })
       .select()
       .single();
-
-    // QR image URL from source (not charge)
-    const qrUrl =
-      source.scannable_code?.image?.download_uri ??
-      charge.source?.scannable_code?.image?.download_uri ??
-      null;
 
     return NextResponse.json({
       order_id: order.id,
@@ -128,11 +126,9 @@ export async function POST(req: NextRequest) {
       total,
     });
   } catch (err) {
-    // Roll back order if Omise fails
     await supabase.from('order_items').delete().eq('order_id', order.id);
     await supabase.from('orders').delete().eq('id', order.id);
 
-    // Surface real Omise error message
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const e = err as any;
     const msg = e?.message || e?.error?.message || 'omise error';

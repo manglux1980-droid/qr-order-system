@@ -5,7 +5,7 @@ import crypto from 'crypto';
 export async function POST(req: NextRequest) {
   const body = await req.text();
 
-  // ─── DEBUG: log all headers to find correct signature header ───
+  // ─── DEBUG: log all headers ───
   const headers: Record<string, string> = {};
   req.headers.forEach((value, key) => { headers[key] = value; });
   console.log('Webhook headers:', JSON.stringify(headers));
@@ -13,7 +13,6 @@ export async function POST(req: NextRequest) {
   // ─── Try multiple signature header names + hash formats ───
   const secret = process.env.OMISE_WEBHOOK_SECRET;
   if (secret) {
-    // Try all possible header names
     const candidates = [
       req.headers.get('x-omise-signature'),
       req.headers.get('omise-signature'),
@@ -37,8 +36,7 @@ export async function POST(req: NextRequest) {
 
     if (!matched) {
       console.warn('Signature mismatch — proceeding anyway for debug');
-      // For debugging, still proceed. Change to `return 401` after we identify the format.
-      // return NextResponse.json({ error: 'invalid signature' }, { status: 401 });
+      // Don't 401 yet — let's see the headers first
     }
   }
 
@@ -57,11 +55,11 @@ export async function POST(req: NextRequest) {
   const { data: payment } = await supabase
     .from('payments')
     .select('id, status, session_id, restaurant_id')
-    .eq('omise_charge_id', charge.id)
+    .eq('gateway_ref', charge.id)
     .single();
 
   if (!payment) {
-    console.warn('Payment not found:', charge.id);
+    console.warn('Payment not found for charge:', charge.id);
     return NextResponse.json({ ok: true });
   }
   if (payment.status === 'paid') return NextResponse.json({ ok: true });

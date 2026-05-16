@@ -2,8 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { omise } from '@/lib/omise';
 
-// POST body: { session_id, method, amount }
-// method: 'promptpay' | 'alipay_plus' | 'truemoney'
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
   const body = await req.json();
@@ -52,7 +50,6 @@ export async function POST(req: NextRequest) {
     const amountSatang = Math.round(amount * 100);
     const sourceType = method === 'promptpay' ? 'promptpay' : method;
 
-    // ─── Step 1: Create Source ───
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const source: any = await (omise as any).sources.create({
       type: sourceType,
@@ -60,7 +57,6 @@ export async function POST(req: NextRequest) {
       currency: 'thb',
     });
 
-    // ─── Step 2: Create Charge using source.id ───
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const charge: any = await omise.charges.create({
       amount: amountSatang,
@@ -68,6 +64,11 @@ export async function POST(req: NextRequest) {
       source: source.id,
       metadata: { session_id, restaurant_id: session.restaurant_id },
     });
+
+    const qrUrl =
+      source.scannable_code?.image?.download_uri ??
+      charge.source?.scannable_code?.image?.download_uri ??
+      null;
 
     const { data: payment, error: payErr } = await supabase
       .from('payments')
@@ -77,17 +78,13 @@ export async function POST(req: NextRequest) {
         method,
         amount,
         status: 'pending',
-        omise_charge_id: charge.id,
+        gateway_ref: charge.id,
+        qr_image_url: qrUrl,
       })
       .select()
       .single();
 
     if (payErr) return NextResponse.json({ error: payErr.message }, { status: 500 });
-
-    const qrUrl =
-      source.scannable_code?.image?.download_uri ??
-      charge.source?.scannable_code?.image?.download_uri ??
-      null;
 
     return NextResponse.json({
       payment,
