@@ -23,18 +23,78 @@ type CashierSession = {
   items: BillItem[];
 };
 
+let thaiVoiceCache: SpeechSynthesisVoice | null = null;
+let femaleVoiceCache: SpeechSynthesisVoice | null = null;
+
+function pickVoices() {
+  const voices = speechSynthesis.getVoices();
+  const thaiAll = voices.filter(v => v.lang.toLowerCase().startsWith('th'));
+
+  if (thaiAll.length > 0) {
+    thaiVoiceCache = thaiAll[0];
+
+    // Try to find female Thai voice
+    // Common Thai female voice names: Kanya, Premwadee, Narisa
+    // On macOS: Kanya
+    // On Windows: Pattara (male) / Premwadee (female)
+    // On Android: th-TH-Wavenet-A (female)
+    const femaleKeywords = ['kanya', 'premwadee', 'narisa', 'female', 'หญิง', 'wavenet-a', 'wavenet-b'];
+    const female = thaiAll.find(v =>
+      femaleKeywords.some(k => v.name.toLowerCase().includes(k))
+    );
+    femaleVoiceCache = female || thaiAll[0]; // fallback to any Thai voice
+  }
+}
+
+function speakThai(text: string, opts?: { female?: boolean; rate?: number; pitch?: number }) {
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'th-TH';
+    u.rate = opts?.rate ?? 1.0;
+    u.volume = 1.0;
+    u.pitch = opts?.pitch ?? 1.0;
+
+    const voice = opts?.female
+      ? (femaleVoiceCache || thaiVoiceCache)
+      : thaiVoiceCache;
+    if (voice) u.voice = voice;
+
+    speechSynthesis.speak(u);
+  } catch (e) {
+    console.warn('Speech failed:', e);
+  }
+}
+
 export default function CashierPage() {
   const [sessions, setSessions] = useState<CashierSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<CashierSession | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [soundOn, setSoundOn] = useState(true);
+  const [voiceReady, setVoiceReady] = useState(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const audioUnlockedRef = useRef(false);
+  const sessionsRef = useRef<CashierSession[]>([]);
 
   const supabase = createClient();
 
-  // Unlock audio context on first user interaction (autoplay policy)
+  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+
+  useEffect(() => {
+    function checkVoices() {
+      pickVoices();
+      if (speechSynthesis.getVoices().length > 0) {
+        setVoiceReady(true);
+        if (thaiVoiceCache) console.log('Thai voice:', thaiVoiceCache.name, thaiVoiceCache.lang);
+        if (femaleVoiceCache) console.log('Female voice:', femaleVoiceCache.name);
+      }
+    }
+    checkVoices();
+    speechSynthesis.addEventListener('voiceschanged', checkVoices);
+    return () => speechSynthesis.removeEventListener('voiceschanged', checkVoices);
+  }, []);
+
   const unlockAudio = useCallback(() => {
     if (audioUnlockedRef.current) return;
     try {
@@ -45,22 +105,18 @@ export default function CashierPage() {
       }
       const ctx = audioCtxRef.current!;
       if (ctx.state === 'suspended') ctx.resume();
-
-      // Trigger speechSynthesis with empty utterance to unlock it
       const u = new SpeechSynthesisUtterance('');
       speechSynthesis.speak(u);
-
       audioUnlockedRef.current = true;
     } catch (e) {
       console.warn('Audio unlock failed:', e);
     }
   }, []);
 
-  // Unlock on first click anywhere
   useEffect(() => {
     const handler = () => unlockAudio();
-    window.addEventListener('click', handler, { once: false });
-    window.addEventListener('keydown', handler, { once: false });
+    window.addEventListener('click', handler);
+    window.addEventListener('keydown', handler);
     return () => {
       window.removeEventListener('click', handler);
       window.removeEventListener('keydown', handler);
@@ -81,9 +137,9 @@ export default function CashierPage() {
     setLoading(false);
   }, []);
 
-  function playDing(tableNumber?: number, amount?: number) {
+  function playDing(pattern: 'normal' | 'cash' = 'normal') {
     if (!audioUnlockedRef.current) {
-      console.warn('Audio not unlocked yet — user needs to click first');
+      console.warn('Audio not unlocked yet');
       return;
     }
     try {
@@ -91,39 +147,45 @@ export default function CashierPage() {
       if (!ctx) return;
       if (ctx.state === 'suspended') ctx.resume();
 
-      // Ding sound
-      [880, 660].forEach((freq, i) => {
+      // Different ding patterns
+      const freqs = pattern === 'cash' ? [1320, 1056, 1584] : [880, 660];
+      const interval = pattern === 'cash' ? 0.15 : 0.2;
+
+      freqs.forEach((freq, i) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.connect(gain);
         gain.connect(ctx.destination);
         osc.frequency.value = freq;
-        gain.gain.setValueAtTime(0.3, ctx.currentTime + i * 0.2);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + i * 0.2 + 0.25);
-        osc.start(ctx.currentTime + i * 0.2);
-        osc.stop(ctx.currentTime + i * 0.2 + 0.25);
+        gain.gain.setValueAtTime(0.3, ctx.currentTime + i * interval);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + i * interval + 0.25);
+        osc.start(ctx.currentTime + i * interval);
+        osc.stop(ctx.currentTime + i * interval + 0.25);
       });
-
-      // Speech — verbose with table + amount
-      setTimeout(() => {
-        try {
-          speechSynthesis.cancel(); // clear queue
-          let text = 'โต๊ะ';
-          if (tableNumber) text += ` ${tableNumber}`;
-          text += ' ขอจ่ายเงิน';
-          if (amount) text += ` ${Math.round(amount)} บาท`;
-          const u = new SpeechSynthesisUtterance(text);
-          u.lang = 'th-TH';
-          u.rate = 1.0;
-          u.volume = 1.0;
-          speechSynthesis.speak(u);
-        } catch (e) {
-          console.warn('Speech failed:', e);
-        }
-      }, 500);
     } catch (e) {
       console.warn('playDing failed:', e);
     }
+  }
+
+  // Event: customer requested payment (status: open → paying)
+  function onPayRequested(tableNumber?: number, amount?: number) {
+    playDing('normal');
+    setTimeout(() => {
+      let text = 'คิดเงินโต๊ะ';
+      if (tableNumber) text += ` ${tableNumber}`;
+      if (amount) text += ` ${Math.round(amount)} บาท`;
+      speakThai(text);
+    }, 500);
+  }
+
+  // Event: payment completed (status → closed)
+  function onPaymentCompleted(amount?: number) {
+    playDing('cash');
+    setTimeout(() => {
+      let text = 'เงินเข้าแล้ว';
+      if (amount) text += ` ${Math.round(amount)} บาท`;
+      speakThai(text, { female: true, pitch: 1.15 });
+    }, 600);
   }
 
   useEffect(() => {
@@ -131,16 +193,20 @@ export default function CashierPage() {
     const channel = supabase
       .channel('cashier-sessions')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'table_sessions' }, (payload) => {
-        if (
-          payload.eventType === 'UPDATE' &&
-          (payload.new as { status?: string }).status === 'paying' &&
-          (payload.old as { status?: string }).status !== 'paying' &&
-          soundOn
-        ) {
-          // Get table number + amount from current sessions state
+        if (payload.eventType === 'UPDATE' && soundOn) {
+          const oldStatus = (payload.old as { status?: string }).status;
+          const newStatus = (payload.new as { status?: string }).status;
           const sessionId = (payload.new as { id: string }).id;
-          const sess = sessions.find(s => s.session_id === sessionId);
-          playDing(sess?.table_number, sess?.total);
+          const sess = sessionsRef.current.find(s => s.session_id === sessionId);
+
+          // Customer requested bill at cashier
+          if (newStatus === 'paying' && oldStatus !== 'paying') {
+            onPayRequested(sess?.table_number, sess?.total);
+          }
+          // Payment completed (via webhook OR cashier checkout)
+          else if (newStatus === 'closed' && oldStatus !== 'closed') {
+            onPaymentCompleted(sess?.total);
+          }
         }
         load();
       })
@@ -175,6 +241,16 @@ export default function CashierPage() {
     return `${Math.floor(diff / 60)} ชม. ${diff % 60} นาที`;
   }
 
+  function testPayRequest() {
+    unlockAudio();
+    setTimeout(() => onPayRequested(5, 250), 100);
+  }
+
+  function testPaymentDone() {
+    unlockAudio();
+    setTimeout(() => onPaymentCompleted(250), 100);
+  }
+
   const requesting = sessions.filter((s) => s.status === 'paying');
   const active = sessions.filter((s) => s.status !== 'paying');
 
@@ -182,20 +258,28 @@ export default function CashierPage() {
     <div className="p-6 max-w-6xl mx-auto text-gray-900">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">แคชเชียร์</h1>
-        <button
-          onClick={() => {
-            setSoundOn((s) => !s);
-            unlockAudio();
-          }}
-          className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
-        >
-          {soundOn ? '🔊 เสียงเปิด' : '🔇 เสียงปิด'}
-        </button>
+        <div className="flex gap-2">
+          <button onClick={testPayRequest} className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
+            🔔 ทดสอบ "ขอจ่าย"
+          </button>
+          <button onClick={testPaymentDone} className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
+            💵 ทดสอบ "เงินเข้า"
+          </button>
+          <button
+            onClick={() => {
+              setSoundOn((s) => !s);
+              unlockAudio();
+            }}
+            className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
+          >
+            {soundOn ? '🔊 เสียงเปิด' : '🔇 เสียงปิด'}
+          </button>
+        </div>
       </div>
 
-      {!audioUnlockedRef.current && soundOn && (
-        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
-          👆 คลิกที่ใดก็ได้บนหน้านี้ครั้งแรกเพื่อเปิดใช้งานเสียง (กฎของ browser)
+      {voiceReady && !thaiVoiceCache && (
+        <div className="mb-4 p-3 bg-orange-50 border border-orange-200 rounded-lg text-sm text-orange-800">
+          ⚠️ Browser นี้ไม่มี Thai voice — ใช้ default แทน
         </div>
       )}
 

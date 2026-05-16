@@ -65,14 +65,9 @@ export default function OrdersKdsPage() {
   const [filter, setFilter] = useState<'all' | 'dine_in' | 'preorder'>('all');
   const audioCtxRef = useRef<AudioContext | null>(null);
   const audioUnlockedRef = useRef(false);
-  const ordersRef = useRef<KdsOrder[]>([]);
 
   const supabase = createClient();
 
-  // Keep ref in sync with state
-  useEffect(() => { ordersRef.current = orders; }, [orders]);
-
-  // Unlock audio on first user gesture
   const unlockAudio = useCallback(() => {
     if (audioUnlockedRef.current) return;
     try {
@@ -83,10 +78,6 @@ export default function OrdersKdsPage() {
       }
       const ctx = audioCtxRef.current!;
       if (ctx.state === 'suspended') ctx.resume();
-
-      const u = new SpeechSynthesisUtterance('');
-      speechSynthesis.speak(u);
-
       audioUnlockedRef.current = true;
     } catch (e) {
       console.warn('Audio unlock failed:', e);
@@ -149,7 +140,7 @@ export default function OrdersKdsPage() {
     setLoading(false);
   }, [supabase]);
 
-  function playDing(orderId?: string) {
+  function playDing() {
     if (!audioUnlockedRef.current) {
       console.warn('Audio not unlocked yet');
       return;
@@ -159,49 +150,17 @@ export default function OrdersKdsPage() {
       if (!ctx) return;
       if (ctx.state === 'suspended') ctx.resume();
 
-      // Ding sound
-      [600, 900].forEach((freq, i) => {
+      [600, 900, 1100].forEach((freq, i) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.connect(gain);
         gain.connect(ctx.destination);
         osc.frequency.value = freq;
-        gain.gain.setValueAtTime(0.25, ctx.currentTime + i * 0.18);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + i * 0.18 + 0.2);
-        osc.start(ctx.currentTime + i * 0.18);
-        osc.stop(ctx.currentTime + i * 0.18 + 0.2);
+        gain.gain.setValueAtTime(0.3, ctx.currentTime + i * 0.15);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + i * 0.15 + 0.25);
+        osc.start(ctx.currentTime + i * 0.15);
+        osc.stop(ctx.currentTime + i * 0.15 + 0.25);
       });
-
-      // Verbose speech with table + items
-      setTimeout(() => {
-        try {
-          speechSynthesis.cancel();
-          const order = ordersRef.current.find(o => o.id === orderId);
-          let text = 'ออเดอร์ใหม่';
-          if (order) {
-            if (order.order_type === 'preorder') {
-              text = `สั่งล่วงหน้า รหัส ${order.pickup_code ?? ''}`;
-            } else if (order.table_number) {
-              text = `ออเดอร์ใหม่ โต๊ะ ${order.table_number}`;
-            }
-            // Add first 2 items
-            const itemNames = order.items.slice(0, 2).map(it =>
-              it.quantity > 1 ? `${it.name_th} ${it.quantity} ที่` : it.name_th
-            );
-            if (itemNames.length > 0) {
-              text += ' ' + itemNames.join(' ');
-              if (order.items.length > 2) text += ' และอื่นๆ';
-            }
-          }
-          const u = new SpeechSynthesisUtterance(text);
-          u.lang = 'th-TH';
-          u.rate = 1.0;
-          u.volume = 1.0;
-          speechSynthesis.speak(u);
-        } catch (e) {
-          console.warn('Speech failed:', e);
-        }
-      }, 400);
     } catch (e) {
       console.warn('playDing failed:', e);
     }
@@ -218,12 +177,7 @@ export default function OrdersKdsPage() {
           (payload.old as { status?: string }).status !== 'confirmed' &&
           soundOn
         ) {
-          const orderId = (payload.new as { id: string }).id;
-          // Load first, then play (so we have updated data)
-          load().then(() => {
-            setTimeout(() => playDing(orderId), 200);
-          });
-          return;
+          playDing();
         }
         load();
       })
@@ -262,6 +216,11 @@ export default function OrdersKdsPage() {
     return 'border-gray-300 bg-white';
   }
 
+  function testSound() {
+    unlockAudio();
+    setTimeout(() => playDing(), 100);
+  }
+
   const filtered = orders.filter(o =>
     filter === 'all' ? true : o.order_type === filter
   );
@@ -272,22 +231,21 @@ export default function OrdersKdsPage() {
     <div className="p-6 max-w-7xl mx-auto text-gray-900">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">ออเดอร์ (KDS)</h1>
-        <button
-          onClick={() => {
-            setSoundOn((s) => !s);
-            unlockAudio();
-          }}
-          className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
-        >
-          {soundOn ? '🔊' : '🔇'}
-        </button>
-      </div>
-
-      {!audioUnlockedRef.current && soundOn && (
-        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
-          👆 คลิกที่ใดก็ได้บนหน้านี้ครั้งแรกเพื่อเปิดใช้งานเสียง (กฎของ browser)
+        <div className="flex gap-2">
+          <button onClick={testSound} className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
+            🔊 ทดสอบเสียง
+          </button>
+          <button
+            onClick={() => {
+              setSoundOn((s) => !s);
+              unlockAudio();
+            }}
+            className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
+          >
+            {soundOn ? '🔊' : '🔇'}
+          </button>
         </div>
-      )}
+      </div>
 
       <div className="flex gap-2 mb-6">
         <button onClick={() => setFilter('all')} className={`px-4 py-2 rounded-lg text-sm font-medium ${filter === 'all' ? 'bg-gray-900 text-white' : 'bg-white border border-gray-300'}`}>
