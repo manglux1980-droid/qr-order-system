@@ -2,9 +2,17 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { Plus, Pencil, Trash2, Eye, EyeOff, Loader2, ChevronDown, ChevronUp, Sparkles } from 'lucide-react'
-import type { MenuItem, MenuCategory } from '@/lib/types'
+import { Plus, Pencil, Trash2, Eye, EyeOff, Loader2, ChevronDown, ChevronUp, Sparkles, X } from 'lucide-react'
+import type { MenuItem, MenuCategory, Locale } from '@/lib/types'
 import MenuItemForm from '@/components/admin/MenuItemForm'
+
+const LOCALES: { key: Locale; label: string }[] = [
+  { key: 'th', label: '🇹🇭 ไทย' },
+  { key: 'en', label: '🇬🇧 EN' },
+  { key: 'zh', label: '🇨🇳 中文' },
+  { key: 'ja', label: '🇯🇵 日本語' },
+  { key: 'ko', label: '🇰🇷 한국어' },
+]
 
 export default function MenuPage() {
   const supabase = createClient()
@@ -16,9 +24,12 @@ export default function MenuPage() {
   // Modal state
   const [showForm, setShowForm] = useState(false)
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null)
+  const [presetCategoryId, setPresetCategoryId] = useState<string | null>(null)
+
+  // Category form modal
+  const [showCategoryModal, setShowCategoryModal] = useState(false)
   const [editingCategory, setEditingCategory] = useState<MenuCategory | null>(null)
-  const [showCategoryForm, setShowCategoryForm] = useState(false)
-  const [newCategoryName, setNewCategoryName] = useState('')
+
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set())
 
   useEffect(() => { loadData() }, [])
@@ -59,21 +70,6 @@ export default function MenuPage() {
     setItems(prev => prev.filter(i => i.id !== id))
   }
 
-  async function addCategory() {
-    if (!newCategoryName.trim()) return
-    const { data } = await supabase.from('menu_categories').insert({
-      restaurant_id: restaurantId,
-      name_th: newCategoryName.trim(),
-      sort_order: categories.length,
-    }).select().single()
-    if (data) {
-      setCategories(prev => [...prev, data])
-      setExpandedCategories(prev => new Set([...prev, data.id]))
-    }
-    setNewCategoryName('')
-    setShowCategoryForm(false)
-  }
-
   async function deleteCategory(id: string) {
     const itemCount = items.filter(i => i.category_id === id).length
     if (!confirm(`ลบหมวดหมู่นี้? ${itemCount > 0 ? `(มีเมนู ${itemCount} รายการที่จะถูกลบด้วย)` : ''}`)) return
@@ -88,6 +84,22 @@ export default function MenuPage() {
       next.has(id) ? next.delete(id) : next.add(id)
       return next
     })
+  }
+
+  function openAddCategory() {
+    setEditingCategory(null)
+    setShowCategoryModal(true)
+  }
+
+  function openEditCategory(cat: MenuCategory) {
+    setEditingCategory(cat)
+    setShowCategoryModal(true)
+  }
+
+  function openAddItem(categoryId?: string) {
+    setEditingItem(null)
+    setPresetCategoryId(categoryId ?? null)
+    setShowForm(true)
   }
 
   if (loading) return (
@@ -105,35 +117,19 @@ export default function MenuPage() {
         </div>
         <div className="flex gap-2">
           <button
-            onClick={() => setShowCategoryForm(true)}
+            onClick={openAddCategory}
             className="flex items-center gap-2 px-3 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 transition-colors"
           >
             <Plus size={16} /> เพิ่มหมวดหมู่
           </button>
           <button
-            onClick={() => { setEditingItem(null); setShowForm(true) }}
+            onClick={() => openAddItem()}
             className="flex items-center gap-2 px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={16} /> เพิ่มเมนู
           </button>
         </div>
       </div>
-
-      {/* Add category form */}
-      {showCategoryForm && (
-        <div className="bg-orange-50 border border-orange-200 rounded-xl p-4 mb-4 flex gap-3">
-          <input
-            autoFocus
-            value={newCategoryName}
-            onChange={e => setNewCategoryName(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && addCategory()}
-            placeholder="ชื่อหมวดหมู่ เช่น อาหารจานเดียว"
-            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-          />
-          <button onClick={addCategory} className="px-4 py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600">บันทึก</button>
-          <button onClick={() => setShowCategoryForm(false)} className="px-4 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">ยกเลิก</button>
-        </div>
-      )}
 
       {/* Categories + Items */}
       <div className="space-y-4">
@@ -148,7 +144,6 @@ export default function MenuPage() {
           const expanded = expandedCategories.has(cat.id)
           return (
             <div key={cat.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-              {/* Category header */}
               <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
                 <button
                   className="flex items-center gap-2 text-left flex-1"
@@ -156,15 +151,23 @@ export default function MenuPage() {
                 >
                   {expanded ? <ChevronUp size={16} className="text-gray-400" /> : <ChevronDown size={16} className="text-gray-400" />}
                   <span className="font-medium text-gray-900">{cat.name_th}</span>
+                  {cat.name_en && <span className="text-xs text-gray-400 hidden sm:inline">{cat.name_en}</span>}
                   <span className="text-xs text-gray-400 bg-gray-200 px-2 py-0.5 rounded-full">{catItems.length}</span>
                 </button>
                 <div className="flex items-center gap-1">
                   <button
-                    onClick={() => { setEditingItem(null); setShowForm(true) }}
+                    onClick={() => openAddItem(cat.id)}
                     className="p-1.5 text-gray-400 hover:text-orange-500 hover:bg-orange-50 rounded-lg transition-colors"
                     title="เพิ่มเมนูในหมวดนี้"
                   >
                     <Plus size={15} />
+                  </button>
+                  <button
+                    onClick={() => openEditCategory(cat)}
+                    className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                    title="แก้ไขหมวดหมู่"
+                  >
+                    <Pencil size={15} />
                   </button>
                   <button
                     onClick={() => deleteCategory(cat.id)}
@@ -175,7 +178,6 @@ export default function MenuPage() {
                 </div>
               </div>
 
-              {/* Items */}
               {expanded && (
                 <div>
                   {catItems.length === 0 && (
@@ -183,15 +185,14 @@ export default function MenuPage() {
                   )}
                   {catItems.map(item => (
                     <div key={item.id} className="flex items-center gap-4 px-4 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 transition-colors">
-                      {/* Image */}
                       <div className="w-14 h-14 rounded-lg bg-gray-100 overflow-hidden flex-shrink-0">
                         {item.image_url
+                          // eslint-disable-next-line @next/next/no-img-element
                           ? <img src={item.image_url} alt={item.name_th} className="w-full h-full object-cover" />
                           : <div className="w-full h-full flex items-center justify-center text-2xl">🍽️</div>
                         }
                       </div>
 
-                      {/* Info */}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <p className="font-medium text-gray-900 text-sm truncate">{item.name_th}</p>
@@ -206,7 +207,6 @@ export default function MenuPage() {
                         )}
                       </div>
 
-                      {/* Actions */}
                       <div className="flex items-center gap-1 flex-shrink-0">
                         <button
                           onClick={() => toggleAvailable(item)}
@@ -243,10 +243,202 @@ export default function MenuPage() {
           restaurantId={restaurantId}
           categories={categories}
           item={editingItem}
-          onClose={() => setShowForm(false)}
-          onSaved={() => { setShowForm(false); loadData() }}
+          // @ts-expect-error optional prop - ignored if MenuItemForm doesn't use it
+          presetCategoryId={presetCategoryId}
+          onClose={() => { setShowForm(false); setPresetCategoryId(null) }}
+          onSaved={() => { setShowForm(false); setPresetCategoryId(null); loadData() }}
         />
       )}
+
+      {/* Category form modal */}
+      {showCategoryModal && (
+        <CategoryFormModal
+          restaurantId={restaurantId}
+          category={editingCategory}
+          sortOrder={categories.length}
+          onClose={() => setShowCategoryModal(false)}
+          onSaved={() => { setShowCategoryModal(false); loadData() }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════
+// Category Form Modal — 5-language + AI translate
+// ═══════════════════════════════════════════════════
+function CategoryFormModal({
+  restaurantId,
+  category,
+  sortOrder,
+  onClose,
+  onSaved,
+}: {
+  restaurantId: string
+  category: MenuCategory | null
+  sortOrder: number
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const supabase = createClient()
+  const [activeLocale, setActiveLocale] = useState<Locale>('th')
+  const [saving, setSaving] = useState(false)
+  const [translating, setTranslating] = useState(false)
+
+  const [names, setNames] = useState<Record<Locale, string>>({
+    th: category?.name_th || '',
+    en: category?.name_en || '',
+    zh: category?.name_zh || '',
+    ja: category?.name_ja || '',
+    ko: category?.name_ko || '',
+  })
+
+  async function handleTranslate() {
+    if (!names.th.trim()) {
+      alert('กรุณากรอกชื่อภาษาไทยก่อน')
+      return
+    }
+    setTranslating(true)
+    try {
+      const res = await fetch('/api/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name_th: names.th, desc_th: '' }),
+      })
+      const data = await res.json()
+      if (data.names) {
+        setNames(prev => ({
+          ...prev,
+          en: data.names.en || prev.en,
+          zh: data.names.zh || prev.zh,
+          ja: data.names.ja || prev.ja,
+          ko: data.names.ko || prev.ko,
+        }))
+      } else if (data.error) {
+        alert(`แปลไม่สำเร็จ: ${data.error}`)
+      }
+    } catch (err) {
+      console.error(err)
+      alert('แปลไม่สำเร็จ กรุณาลองใหม่')
+    }
+    setTranslating(false)
+  }
+
+  async function handleSave() {
+    if (!names.th.trim()) {
+      alert('กรุณากรอกชื่อภาษาไทย')
+      return
+    }
+    setSaving(true)
+    const payload = {
+      name_th: names.th.trim(),
+      name_en: names.en.trim() || null,
+      name_zh: names.zh.trim() || null,
+      name_ja: names.ja.trim() || null,
+      name_ko: names.ko.trim() || null,
+    }
+
+    if (category) {
+      await supabase.from('menu_categories').update(payload).eq('id', category.id)
+    } else {
+      await supabase.from('menu_categories').insert({
+        ...payload,
+        restaurant_id: restaurantId,
+        sort_order: sortOrder,
+      })
+    }
+    setSaving(false)
+    onSaved()
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col">
+        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+          <h2 className="text-lg font-bold text-gray-900">
+            {category ? 'แก้ไขหมวดหมู่' : 'เพิ่มหมวดหมู่'}
+          </h2>
+          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-lg">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
+          {/* Language tabs + translate button */}
+          <div className="flex items-center justify-between gap-2 border-b border-gray-200">
+            <div className="flex gap-1 flex-wrap">
+              {LOCALES.map(({ key, label }) => {
+                const hasValue = names[key].trim().length > 0
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setActiveLocale(key)}
+                    className={`px-3 py-2 text-xs font-medium transition-colors flex items-center gap-1 ${
+                      activeLocale === key
+                        ? 'border-b-2 border-orange-500 text-orange-600'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    {label}
+                    {hasValue && <span className="w-1.5 h-1.5 rounded-full bg-green-500" />}
+                  </button>
+                )
+              })}
+            </div>
+            <button
+              onClick={handleTranslate}
+              disabled={translating || !names.th.trim()}
+              className="px-3 py-1.5 bg-purple-100 text-purple-700 rounded-lg text-xs font-medium hover:bg-purple-200 disabled:opacity-50 flex items-center gap-1 whitespace-nowrap"
+            >
+              {translating
+                ? <Loader2 size={14} className="animate-spin" />
+                : <Sparkles size={14} />}
+              {translating ? 'กำลังแปล...' : 'แปลอัตโนมัติ (AI)'}
+            </button>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              ชื่อหมวดหมู่ ({LOCALES.find(l => l.key === activeLocale)?.label})
+              {activeLocale === 'th' && <span className="text-red-500 ml-1">*</span>}
+            </label>
+            <input
+              type="text"
+              value={names[activeLocale]}
+              onChange={(e) => setNames(prev => ({ ...prev, [activeLocale]: e.target.value }))}
+              placeholder={
+                activeLocale === 'th'
+                  ? 'เช่น อาหารจานเดียว, ขนมหวาน, เครื่องดื่ม'
+                  : activeLocale === 'en' ? 'e.g. Main Dishes, Desserts, Drinks'
+                  : activeLocale === 'zh' ? '例: 主菜, 甜点, 饮料'
+                  : activeLocale === 'ja' ? '例: メイン, デザート, ドリンク'
+                  : '예: 메인 요리, 디저트, 음료'
+              }
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-500"
+            />
+          </div>
+
+          <p className="text-xs text-gray-500">
+            💡 ใส่ชื่อภาษาไทยให้ครบ แล้วกด &quot;แปลอัตโนมัติ (AI)&quot; ได้ภาษาอื่นทันที
+          </p>
+        </div>
+
+        <div className="px-6 py-4 border-t border-gray-200 flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 py-2.5 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50"
+          >
+            ยกเลิก
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || !names.th.trim()}
+            className="flex-1 py-2.5 bg-orange-500 text-white rounded-lg font-medium hover:bg-orange-600 disabled:opacity-50"
+          >
+            {saving ? 'กำลังบันทึก...' : (category ? 'บันทึก' : 'เพิ่มหมวดหมู่')}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
