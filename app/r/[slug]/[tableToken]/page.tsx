@@ -1,10 +1,10 @@
 'use client'
 
-import { useEffect, useState, useCallback, use } from 'react'
+import { useEffect, useState, useCallback, useRef, use } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getMenuName, getMenuDesc, getCategoryName, localeNames } from '@/lib/i18n/config'
 import type { MenuItem, MenuCategory, Locale } from '@/lib/types'
-import { Globe, Minus, Plus, X, ArrowLeft, ShoppingCart, ChevronRight } from 'lucide-react'
+import { Globe, Minus, Plus, X, ArrowLeft, ShoppingCart, ChevronRight, Sparkles } from 'lucide-react'
 import PaymentModal from '@/components/customer/PaymentModal'
 
 type CategoryWithImage = MenuCategory & { image_url?: string | null }
@@ -68,6 +68,15 @@ type SubmittedItem = {
   createdAt: string
 }
 
+type Suggested = {
+  id: string
+  name_th: string
+  name_en: string | null
+  price: number
+  image_url: string | null
+  reason: string
+}
+
 type Step = 'categories' | 'items' | 'option_picker'
 
 export default function CustomerMenuPage({
@@ -86,6 +95,7 @@ export default function CustomerMenuPage({
   const [optionGroupsByItem, setOptionGroupsByItem] = useState<Record<string, OptionGroup[]>>({})
   const [loading, setLoading] = useState(true)
   const [restaurantName, setRestaurantName] = useState('')
+  const [restaurantId, setRestaurantId] = useState<string>('')
 
   const [session, setSession] = useState<{ id: string; status?: string } | null>(null)
   const [order, setOrder] = useState<{ id: string } | null>(null)
@@ -109,6 +119,12 @@ export default function CustomerMenuPage({
 
   const [showPayment, setShowPayment] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+
+  // ─── Suggestion state ───
+  const [suggested, setSuggested] = useState<Suggested | null>(null)
+  const dismissedAtRef = useRef<number>(0)
+  const seenSuggestionsRef = useRef<Set<string>>(new Set())
+  const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     const lang = navigator.language.toLowerCase()
@@ -145,6 +161,7 @@ export default function CustomerMenuPage({
       .single()
 
     if (restaurant) {
+      setRestaurantId(restaurant.id)
       setRestaurantName(locale === 'th' ? restaurant.name_th : (restaurant.name_en || restaurant.name_th))
 
       const [{ data: cats }, { data: menuItems }, { data: links }] = await Promise.all([
@@ -188,6 +205,72 @@ export default function CustomerMenuPage({
       setOptionGroupsByItem(groupMap)
     }
     setLoading(false)
+  }
+
+  // Fetch AI suggestion based on cart
+  const fetchSuggestion = useCallback(async (currentCart: CartItem[]) => {
+    if (!restaurantId || currentCart.length === 0) {
+      setSuggested(null)
+      return
+    }
+
+    // Skip if dismissed recently (within 30s)
+    if (Date.now() - dismissedAtRef.current < 30000) return
+
+    // Categories in cart (deduped)
+    const cartCategories = Array.from(
+      new Set(currentCart.map(c => c.menuItem.category_id))
+    )
+
+    try {
+      const res = await fetch('/api/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          restaurant_id: restaurantId,
+          cart_categories: cartCategories,
+          exclude_item_ids: Array.from(seenSuggestionsRef.current),
+        }),
+      })
+      const data = await res.json()
+      if (data.suggested_item) {
+        setSuggested(data.suggested_item)
+        seenSuggestionsRef.current.add(data.suggested_item.id)
+
+        // Auto-dismiss after 5 seconds
+        if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
+        dismissTimerRef.current = setTimeout(() => {
+          setSuggested(null)
+        }, 5000)
+      }
+    } catch (err) {
+      console.warn('Suggestion fetch failed:', err)
+    }
+  }, [restaurantId])
+
+  function dismissSuggestion() {
+    dismissedAtRef.current = Date.now()
+    setSuggested(null)
+    if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
+  }
+
+  function addSuggestedToCart() {
+    if (!suggested) return
+    const menuItem = items.find(it => it.id === suggested.id)
+    if (!menuItem) {
+      dismissSuggestion()
+      return
+    }
+    // Check if has options
+    const groups = optionGroupsByItem[menuItem.id] ?? []
+    if (groups.length > 0) {
+      setPickingItem(menuItem)
+      setStep('option_picker')
+      dismissSuggestion()
+    } else {
+      addToCart(menuItem, [], '')
+      dismissSuggestion()
+    }
   }
 
   const refreshBill = useCallback(async () => {
@@ -292,16 +375,20 @@ export default function CustomerMenuPage({
   function addToCart(menuItem: MenuItem, selectedOptions: SelectedOption[], note: string) {
     const optDelta = selectedOptions.reduce((s, o) => s + o.price_delta * o.quantity, 0)
     const unitPrice = menuItem.price + optDelta
-    setCart(prev => [...prev, {
+    const newCart = [...cart, {
       cartId: crypto.randomUUID(),
       menuItem,
       quantity: 1,
       selectedOptions,
       note,
       unitPrice,
-    }])
+    }]
+    setCart(newCart)
     setPickingItem(null)
     setStep('items')
+
+    // Trigger AI suggestion after add
+    fetchSuggestion(newCart)
   }
 
   function updateCartQty(cartId: string, delta: number) {
@@ -357,6 +444,8 @@ export default function CustomerMenuPage({
       setCart([])
       setShowCart(false)
       setShowSuccess(true)
+      seenSuggestionsRef.current.clear()  // reset suggestion history
+      dismissSuggestion()
       refreshBill()
     } else {
       alert(t('ส่งครัวไม่สำเร็จ', 'Failed to send', '发送失败', '送信失敗', '전송 실패'))
@@ -492,6 +581,39 @@ export default function CustomerMenuPage({
     </div>
   )
 
+  const SuggestionBanner = suggested && (
+    <div className="fixed left-4 right-4 z-40 animate-slide-up" style={{ bottom: cartCount > 0 || billTotal > 0 ? '88px' : '16px' }}>
+      <div className="bg-white border-2 border-purple-300 rounded-2xl shadow-xl p-3 flex items-center gap-3">
+        <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-purple-50 to-pink-50 overflow-hidden flex-shrink-0">
+          {suggested.image_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={suggested.image_url} alt="" className="w-full h-full object-cover object-center" />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-2xl">🍽️</div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[10px] text-purple-600 font-bold flex items-center gap-1">
+            <Sparkles size={10} /> {t('แนะนำ', 'Suggested', '推荐', 'おすすめ', '추천')}
+          </p>
+          <p className="font-bold text-gray-900 text-sm truncate">{suggested.name_th}</p>
+          <p className="text-xs text-gray-600 truncate">{suggested.reason}</p>
+        </div>
+        <div className="flex flex-col items-end gap-1 flex-shrink-0">
+          <button onClick={dismissSuggestion} className="text-gray-400 hover:text-gray-600">
+            <X size={16} />
+          </button>
+          <button
+            onClick={addSuggestedToCart}
+            className="bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold px-3 py-1.5 rounded-full whitespace-nowrap flex items-center gap-1"
+          >
+            ฿{suggested.price} <Plus size={12} />
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
   if (step === 'categories') {
     return (
       <div className="min-h-screen bg-gray-50 pb-28">
@@ -534,6 +656,8 @@ export default function CustomerMenuPage({
             {t('ยังไม่มีเมนู', 'No menu yet', '暂无菜单', 'メニューがありません', '메뉴 없음')}
           </p>
         )}
+
+        {SuggestionBanner}
 
         <FloatingButtons
           cartCount={cartCount}
@@ -621,6 +745,8 @@ export default function CustomerMenuPage({
         )}
       </div>
 
+      {SuggestionBanner}
+
       <FloatingButtons cartCount={cartCount} cartTotal={cartTotal} billTotal={billTotal} onShowCart={() => setShowCart(true)} onShowBill={() => setShowBill(true)} t={t} />
 
       {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={submitToKitchen} submitting={submitting} />}
@@ -629,12 +755,22 @@ export default function CustomerMenuPage({
       {showPayment && session && (
         <PaymentModal sessionId={session.id} amount={billTotal} onClose={() => setShowPayment(false)} onPaid={() => { setShowPayment(false); refreshBill() }} />
       )}
+
+      <style jsx>{`
+        @keyframes slide-up {
+          from { transform: translateY(120%); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        .animate-slide-up {
+          animation: slide-up 0.3s ease-out;
+        }
+      `}</style>
     </div>
   )
 }
 
 // ═══════════════════════════════════════════════════
-// SUB-COMPONENTS
+// SUB-COMPONENTS (unchanged)
 // ═══════════════════════════════════════════════════
 
 function FloatingButtons({ cartCount, cartTotal, billTotal, onShowCart, onShowBill, t }: {
