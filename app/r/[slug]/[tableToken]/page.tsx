@@ -109,6 +109,7 @@ export default function CustomerMenuPage({
   const [showCart, setShowCart] = useState(false)
   const [showBill, setShowBill] = useState(false)
   const [showSuccess, setShowSuccess] = useState(false)
+  const [cartBounce, setCartBounce] = useState(false)
 
   const [submittedItems, setSubmittedItems] = useState<SubmittedItem[]>([])
   const [billTotal, setBillTotal] = useState(0)
@@ -122,10 +123,12 @@ export default function CustomerMenuPage({
 
   // ─── Suggestion state ───
   const [suggested, setSuggested] = useState<Suggested | null>(null)
-  const [cartBounce, setCartBounce] = useState(false)
   const dismissedAtRef = useRef<number>(0)
   const seenSuggestionsRef = useRef<Set<string>>(new Set())
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const restaurantIdRef = useRef<string>('')
+
+  useEffect(() => { restaurantIdRef.current = restaurantId }, [restaurantId])
 
   useEffect(() => {
     const lang = navigator.language.toLowerCase()
@@ -208,27 +211,23 @@ export default function CustomerMenuPage({
     setLoading(false)
   }
 
-  // Fetch AI suggestion based on cart
-  const fetchSuggestion = useCallback(async (currentCart: CartItem[]) => {
-    if (!restaurantId || currentCart.length === 0) {
+  // Fetch AI suggestion
+  async function fetchSuggestion(currentCart: CartItem[]) {
+    const rid = restaurantIdRef.current
+    if (!rid || currentCart.length === 0) {
       setSuggested(null)
       return
     }
-
-    // Skip if dismissed recently (within 30s)
     if (Date.now() - dismissedAtRef.current < 30000) return
 
-    // Categories in cart (deduped)
-    const cartCategories = Array.from(
-      new Set(currentCart.map(c => c.menuItem.category_id))
-    )
+    const cartCategories = Array.from(new Set(currentCart.map(c => c.menuItem.category_id)))
 
     try {
       const res = await fetch('/api/suggest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          restaurant_id: restaurantId,
+          restaurant_id: rid,
           cart_categories: cartCategories,
           exclude_item_ids: Array.from(seenSuggestionsRef.current),
         }),
@@ -238,7 +237,6 @@ export default function CustomerMenuPage({
         setSuggested(data.suggested_item)
         seenSuggestionsRef.current.add(data.suggested_item.id)
 
-        // Auto-dismiss after 5 seconds
         if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
         dismissTimerRef.current = setTimeout(() => {
           setSuggested(null)
@@ -247,7 +245,7 @@ export default function CustomerMenuPage({
     } catch (err) {
       console.warn('Suggestion fetch failed:', err)
     }
-  }, [restaurantId])
+  }
 
   function dismissSuggestion() {
     dismissedAtRef.current = Date.now()
@@ -262,10 +260,10 @@ export default function CustomerMenuPage({
       dismissSuggestion()
       return
     }
-    // Trigger bounce animation
+    // Bounce animation
     setCartBounce(true)
     setTimeout(() => setCartBounce(false), 600)
-    // Check if has options
+
     const groups = optionGroupsByItem[menuItem.id] ?? []
     if (groups.length > 0) {
       setPickingItem(menuItem)
@@ -390,8 +388,6 @@ export default function CustomerMenuPage({
     setCart(newCart)
     setPickingItem(null)
     setStep('items')
-
-    // Trigger AI suggestion after add
     fetchSuggestion(newCart)
   }
 
@@ -448,7 +444,7 @@ export default function CustomerMenuPage({
       setCart([])
       setShowCart(false)
       setShowSuccess(true)
-      seenSuggestionsRef.current.clear()  // reset suggestion history
+      seenSuggestionsRef.current.clear()
       dismissSuggestion()
       refreshBill()
     } else {
@@ -679,6 +675,16 @@ export default function CustomerMenuPage({
         {showPayment && session && (
           <PaymentModal sessionId={session.id} amount={billTotal} onClose={() => setShowPayment(false)} onPaid={() => { setShowPayment(false); refreshBill() }} />
         )}
+
+        <style jsx>{`
+          @keyframes slide-up {
+            from { transform: translateY(120%); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+          }
+          .animate-slide-up {
+            animation: slide-up 0.3s ease-out;
+          }
+        `}</style>
       </div>
     )
   }
@@ -752,7 +758,7 @@ export default function CustomerMenuPage({
 
       {SuggestionBanner}
 
-      <FloatingButtons cartCount={cartCount} cartTotal={cartTotal} billTotal={billTotal} onShowCart={() => setShowCart(true)} onShowBill={() => setShowBill(true)} t={t} />
+      <FloatingButtons cartCount={cartCount} cartTotal={cartTotal} billTotal={billTotal} bounce={cartBounce} onShowCart={() => setShowCart(true)} onShowBill={() => setShowBill(true)} t={t} />
 
       {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={submitToKitchen} submitting={submitting} />}
       {showBill && <BillDrawer table={table} submittedItems={submittedItems} billTotal={billTotal} isPaying={isPaying} requestingBill={requestingBill} t={t} onClose={() => setShowBill(false)} onRequestBill={requestBill} onCancelRequest={cancelBillRequest} onPayQr={() => { setShowBill(false); setShowPayment(true) }} />}
@@ -769,16 +775,13 @@ export default function CustomerMenuPage({
         .animate-slide-up {
           animation: slide-up 0.3s ease-out;
         }
-               
-        
-        
       `}</style>
     </div>
   )
 }
 
 // ═══════════════════════════════════════════════════
-// SUB-COMPONENTS (unchanged)
+// SUB-COMPONENTS
 // ═══════════════════════════════════════════════════
 
 function FloatingButtons({ cartCount, cartTotal, billTotal, bounce, onShowCart, onShowBill, t }: {

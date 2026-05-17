@@ -32,17 +32,11 @@ function pickVoices() {
 
   if (thaiAll.length > 0) {
     thaiVoiceCache = thaiAll[0];
-
-    // Try to find female Thai voice
-    // Common Thai female voice names: Kanya, Premwadee, Narisa
-    // On macOS: Kanya
-    // On Windows: Pattara (male) / Premwadee (female)
-    // On Android: th-TH-Wavenet-A (female)
     const femaleKeywords = ['kanya', 'premwadee', 'narisa', 'female', 'หญิง', 'wavenet-a', 'wavenet-b'];
     const female = thaiAll.find(v =>
       femaleKeywords.some(k => v.name.toLowerCase().includes(k))
     );
-    femaleVoiceCache = female || thaiAll[0]; // fallback to any Thai voice
+    femaleVoiceCache = female || thaiAll[0];
   }
 }
 
@@ -71,6 +65,7 @@ export default function CashierPage() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<CashierSession | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [soundOn, setSoundOn] = useState(true);
   const [voiceReady, setVoiceReady] = useState(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -86,8 +81,6 @@ export default function CashierPage() {
       pickVoices();
       if (speechSynthesis.getVoices().length > 0) {
         setVoiceReady(true);
-        if (thaiVoiceCache) console.log('Thai voice:', thaiVoiceCache.name, thaiVoiceCache.lang);
-        if (femaleVoiceCache) console.log('Female voice:', femaleVoiceCache.name);
       }
     }
     checkVoices();
@@ -138,16 +131,12 @@ export default function CashierPage() {
   }, []);
 
   function playDing(pattern: 'normal' | 'cash' = 'normal') {
-    if (!audioUnlockedRef.current) {
-      console.warn('Audio not unlocked yet');
-      return;
-    }
+    if (!audioUnlockedRef.current) return;
     try {
       const ctx = audioCtxRef.current;
       if (!ctx) return;
       if (ctx.state === 'suspended') ctx.resume();
 
-      // Different ding patterns
       const freqs = pattern === 'cash' ? [1320, 1056, 1584] : [880, 660];
       const interval = pattern === 'cash' ? 0.15 : 0.2;
 
@@ -167,7 +156,6 @@ export default function CashierPage() {
     }
   }
 
-  // Event: customer requested payment (status: open → paying)
   function onPayRequested(tableNumber?: number, amount?: number) {
     playDing('normal');
     setTimeout(() => {
@@ -178,7 +166,6 @@ export default function CashierPage() {
     }, 500);
   }
 
-  // Event: payment completed (status → closed)
   function onPaymentCompleted(amount?: number) {
     playDing('cash');
     setTimeout(() => {
@@ -199,13 +186,14 @@ export default function CashierPage() {
           const sessionId = (payload.new as { id: string }).id;
           const sess = sessionsRef.current.find(s => s.session_id === sessionId);
 
-          // Customer requested bill at cashier
           if (newStatus === 'paying' && oldStatus !== 'paying') {
             onPayRequested(sess?.table_number, sess?.total);
           }
-          // Payment completed (via webhook OR cashier checkout)
           else if (newStatus === 'closed' && oldStatus !== 'closed') {
-            onPaymentCompleted(sess?.total);
+            // Only announce if there was a payment (not manual close)
+            if (sess && sess.total > 0) {
+              onPaymentCompleted(sess?.total);
+            }
           }
         }
         load();
@@ -228,6 +216,28 @@ export default function CashierPage() {
     const json = await res.json();
     if (!res.ok) {
       alert(json.error || 'รับเงินไม่สำเร็จ');
+      return;
+    }
+    setSelected(null);
+    load();
+  }
+
+  async function closeSession(session: CashierSession) {
+    const msg = session.total > 0
+      ? `⚠️ ปิดโต๊ะ #${session.table_number} โดยไม่รับเงิน?\n(มียอดค้าง ฿${session.total.toFixed(2)} — ใช้เมื่อลูกค้าออกไปแล้ว/ไม่จ่าย)`
+      : `ปิดโต๊ะ #${session.table_number}?\n(ลูกค้าเปิดโต๊ะแต่ไม่สั่งอะไรเลย)`;
+    if (!window.confirm(msg)) return;
+
+    setClosing(true);
+    const res = await fetch('/api/cashier/close-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: session.session_id, reason: 'manual' }),
+    });
+    setClosing(false);
+    const json = await res.json();
+    if (!res.ok) {
+      alert(json.error || 'ปิดโต๊ะไม่สำเร็จ');
       return;
     }
     setSelected(null);
@@ -260,10 +270,10 @@ export default function CashierPage() {
         <h1 className="text-2xl font-bold">แคชเชียร์</h1>
         <div className="flex gap-2">
           <button onClick={testPayRequest} className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
-            🔔 ทดสอบ "ขอจ่าย"
+            🔔 ทดสอบ &quot;ขอจ่าย&quot;
           </button>
           <button onClick={testPaymentDone} className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50">
-            💵 ทดสอบ "เงินเข้า"
+            💵 ทดสอบ &quot;เงินเข้า&quot;
           </button>
           <button
             onClick={() => {
@@ -321,7 +331,13 @@ export default function CashierPage() {
 
           <div className="lg:sticky lg:top-6 h-fit">
             {selected ? (
-              <BillDetail session={selected} onCheckout={() => checkout(selected)} submitting={submitting} />
+              <BillDetail
+                session={selected}
+                onCheckout={() => checkout(selected)}
+                onCloseSession={() => closeSession(selected)}
+                submitting={submitting}
+                closing={closing}
+              />
             ) : (
               <div className="bg-white border border-gray-200 rounded-xl p-8 text-center text-gray-500">
                 เลือกโต๊ะจากรายการด้านซ้ายเพื่อดูบิล
@@ -358,10 +374,12 @@ function SessionCard({ s, selected, onClick, highlight, elapsed }: {
   );
 }
 
-function BillDetail({ session, onCheckout, submitting }: {
+function BillDetail({ session, onCheckout, onCloseSession, submitting, closing }: {
   session: CashierSession;
   onCheckout: () => void;
+  onCloseSession: () => void;
   submitting: boolean;
+  closing: boolean;
 }) {
   return (
     <div className="bg-white border-2 border-gray-300 rounded-xl overflow-hidden shadow-md">
@@ -377,36 +395,50 @@ function BillDetail({ session, onCheckout, submitting }: {
       </div>
 
       <div className="p-5">
-        <div className="space-y-3 mb-4">
-          {session.items.map((it, idx) => (
-            <div key={idx} className="border-b border-gray-100 pb-2 last:border-0">
-              <div className="flex justify-between items-start gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-gray-900 text-sm">{it.name}</p>
-                  {it.options.map((opt, i) => (
-                    <p key={i} className="text-xs text-gray-600 ml-2">- {opt}</p>
-                  ))}
-                </div>
-                <div className="text-right text-sm flex-shrink-0">
-                  <p className="text-gray-700">×{it.qty}</p>
-                  <p className="font-bold text-gray-900">฿{it.subtotal.toFixed(2)}</p>
+        {session.items.length === 0 ? (
+          <p className="text-center text-gray-500 py-6 text-sm">ยังไม่มีรายการอาหารที่ส่งครัว</p>
+        ) : (
+          <div className="space-y-3 mb-4">
+            {session.items.map((it, idx) => (
+              <div key={idx} className="border-b border-gray-100 pb-2 last:border-0">
+                <div className="flex justify-between items-start gap-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-gray-900 text-sm">{it.name}</p>
+                    {it.options.map((opt, i) => (
+                      <p key={i} className="text-xs text-gray-600 ml-2">- {opt}</p>
+                    ))}
+                  </div>
+                  <div className="text-right text-sm flex-shrink-0">
+                    <p className="text-gray-700">×{it.qty}</p>
+                    <p className="font-bold text-gray-900">฿{it.subtotal.toFixed(2)}</p>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
         <div className="border-t-2 border-gray-300 pt-3 flex justify-between items-center">
           <span className="font-bold text-gray-900">ยอดรวม</span>
           <span className="font-bold text-2xl text-orange-600">฿{session.total.toFixed(2)}</span>
         </div>
 
+        {session.total > 0 && (
+          <button
+            onClick={onCheckout}
+            disabled={submitting || closing}
+            className="mt-6 w-full py-4 bg-green-600 text-white font-bold text-lg rounded-xl hover:bg-green-700 disabled:opacity-50"
+          >
+            {submitting ? 'กำลังบันทึก...' : `✓ รับเงิน ฿${session.total.toFixed(2)}`}
+          </button>
+        )}
+
         <button
-          onClick={onCheckout}
-          disabled={submitting || session.total <= 0}
-          className="mt-6 w-full py-4 bg-green-600 text-white font-bold text-lg rounded-xl hover:bg-green-700 disabled:opacity-50"
+          onClick={onCloseSession}
+          disabled={submitting || closing}
+          className="mt-2 w-full py-3 border-2 border-red-300 text-red-700 font-medium rounded-xl hover:bg-red-50 disabled:opacity-50"
         >
-          {submitting ? 'กำลังบันทึก...' : `✓ รับเงิน ฿${session.total.toFixed(2)}`}
+          {closing ? 'กำลังปิด...' : '🚪 ปิดโต๊ะ (ลูกค้าไม่อยู่แล้ว)'}
         </button>
       </div>
     </div>
