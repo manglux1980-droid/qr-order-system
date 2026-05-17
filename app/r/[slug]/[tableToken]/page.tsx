@@ -122,6 +122,7 @@ export default function CustomerMenuPage({
 
   // ─── Suggestion state ───
   const [suggested, setSuggested] = useState<Suggested | null>(null)
+  const [cartBounce, setCartBounce] = useState(false)
   const dismissedAtRef = useRef<number>(0)
   const seenSuggestionsRef = useRef<Set<string>>(new Set())
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -241,7 +242,7 @@ export default function CustomerMenuPage({
         if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
         dismissTimerRef.current = setTimeout(() => {
           setSuggested(null)
-        }, 5000)
+        }, 10000)
       }
     } catch (err) {
       console.warn('Suggestion fetch failed:', err)
@@ -261,6 +262,9 @@ export default function CustomerMenuPage({
       dismissSuggestion()
       return
     }
+    // Trigger bounce animation
+    setCartBounce(true)
+    setTimeout(() => setCartBounce(false), 600)
     // Check if has options
     const groups = optionGroupsByItem[menuItem.id] ?? []
     if (groups.length > 0) {
@@ -663,6 +667,7 @@ export default function CustomerMenuPage({
           cartCount={cartCount}
           cartTotal={cartTotal}
           billTotal={billTotal}
+          bounce={cartBounce}
           onShowCart={() => setShowCart(true)}
           onShowBill={() => setShowBill(true)}
           t={t}
@@ -764,6 +769,21 @@ export default function CustomerMenuPage({
         .animate-slide-up {
           animation: slide-up 0.3s ease-out;
         }
+        @keyframes cart-pulse {
+          0%, 100% { transform: scale(1); background-color: rgb(21 128 61); }
+          50% { transform: scale(1.05); background-color: rgb(34 197 94); }
+        }
+        :global(.animate-cart-pulse) {
+          animation: cart-pulse 0.6s ease-in-out;
+        }
+        @keyframes cart-shake {
+          0%, 100% { transform: rotate(0); }
+          25% { transform: rotate(-15deg) scale(1.2); }
+          75% { transform: rotate(15deg) scale(1.2); }
+        }
+        :global(.animate-cart-shake) {
+          animation: cart-shake 0.6s ease-in-out;
+        }
       `}</style>
     </div>
   )
@@ -773,8 +793,9 @@ export default function CustomerMenuPage({
 // SUB-COMPONENTS (unchanged)
 // ═══════════════════════════════════════════════════
 
-function FloatingButtons({ cartCount, cartTotal, billTotal, onShowCart, onShowBill, t }: {
+function FloatingButtons({ cartCount, cartTotal, billTotal, bounce, onShowCart, onShowBill, t }: {
   cartCount: number; cartTotal: number; billTotal: number
+  bounce?: boolean
   onShowCart: () => void; onShowBill: () => void
   t: (th: string, en: string, zh: string, ja: string, ko: string) => string
 }) {
@@ -784,10 +805,10 @@ function FloatingButtons({ cartCount, cartTotal, billTotal, onShowCart, onShowBi
       {cartCount > 0 ? (
         <button
           onClick={onShowCart}
-          className="w-full bg-green-700 hover:bg-green-800 text-white rounded-full py-3.5 px-5 flex items-center justify-between shadow-lg"
+          className={`w-full bg-green-700 hover:bg-green-800 text-white rounded-full py-3.5 px-5 flex items-center justify-between shadow-lg transition-transform ${bounce ? 'animate-cart-pulse' : ''}`}
         >
           <span className="flex items-center gap-2">
-            <ShoppingCart size={20} />
+            <ShoppingCart size={20} className={bounce ? 'animate-cart-shake' : ''} />
             <span className="bg-white text-green-700 text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center">
               {cartCount}
             </span>
