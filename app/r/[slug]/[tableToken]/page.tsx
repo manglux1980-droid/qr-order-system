@@ -769,21 +769,9 @@ export default function CustomerMenuPage({
         .animate-slide-up {
           animation: slide-up 0.3s ease-out;
         }
-        @keyframes cart-pulse {
-          0%, 100% { transform: scale(1); background-color: rgb(21 128 61); }
-          50% { transform: scale(1.05); background-color: rgb(34 197 94); }
-        }
-        :global(.animate-cart-pulse) {
-          animation: cart-pulse 0.6s ease-in-out;
-        }
-        @keyframes cart-shake {
-          0%, 100% { transform: rotate(0); }
-          25% { transform: rotate(-15deg) scale(1.2); }
-          75% { transform: rotate(15deg) scale(1.2); }
-        }
-        :global(.animate-cart-shake) {
-          animation: cart-shake 0.6s ease-in-out;
-        }
+               
+        
+        
       `}</style>
     </div>
   )
@@ -805,10 +793,10 @@ function FloatingButtons({ cartCount, cartTotal, billTotal, bounce, onShowCart, 
       {cartCount > 0 ? (
         <button
           onClick={onShowCart}
-          className={`w-full bg-green-700 hover:bg-green-800 text-white rounded-full py-3.5 px-5 flex items-center justify-between shadow-lg transition-transform ${bounce ? 'animate-cart-pulse' : ''}`}
+          className={`w-full text-white rounded-full py-3.5 px-5 flex items-center justify-between shadow-lg transition-all duration-300 ${bounce ? 'bg-green-400 scale-110 ring-4 ring-green-300' : 'bg-green-700 hover:bg-green-800'}`}
         >
           <span className="flex items-center gap-2">
-            <ShoppingCart size={20} className={bounce ? 'animate-cart-shake' : ''} />
+            <ShoppingCart size={20} className={`transition-transform duration-300 ${bounce ? 'scale-150 -rotate-12' : ''}`} />
             <span className="bg-white text-green-700 text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center">
               {cartCount}
             </span>

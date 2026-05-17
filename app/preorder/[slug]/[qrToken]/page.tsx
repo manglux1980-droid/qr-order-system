@@ -1,10 +1,10 @@
 'use client'
 
-import { useEffect, useState, use } from 'react'
+import { useEffect, useState, useRef, use } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getMenuName, getMenuDesc, getCategoryName, localeNames } from '@/lib/i18n/config'
 import type { MenuItem, MenuCategory, Locale } from '@/lib/types'
-import { Globe, Minus, Plus, X, ArrowLeft, ShoppingCart, ChevronRight, Loader2 } from 'lucide-react'
+import { Globe, Minus, Plus, X, ArrowLeft, ShoppingCart, ChevronRight, Loader2, Sparkles } from 'lucide-react'
 
 type CategoryWithImage = MenuCategory & { image_url?: string | null }
 
@@ -49,6 +49,15 @@ type CartItem = {
   unitPrice: number
 }
 
+type Suggested = {
+  id: string
+  name_th: string
+  name_en: string | null
+  price: number
+  image_url: string | null
+  reason: string
+}
+
 type Step = 'categories' | 'items' | 'option_picker' | 'payment' | 'success'
 
 function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
@@ -73,6 +82,7 @@ export default function PreorderPage({
   const [optionGroupsByItem, setOptionGroupsByItem] = useState<Record<string, OptionGroup[]>>({})
   const [loading, setLoading] = useState(true)
   const [restaurantName, setRestaurantName] = useState('')
+  const [restaurantId, setRestaurantId] = useState<string>('')
   const [invalidQr, setInvalidQr] = useState(false)
 
   const [step, setStep] = useState<Step>('categories')
@@ -81,6 +91,7 @@ export default function PreorderPage({
 
   const [cart, setCart] = useState<CartItem[]>([])
   const [showCart, setShowCart] = useState(false)
+  const [cartBounce, setCartBounce] = useState(false)
 
   const [qrPaymentImg, setQrPaymentImg] = useState<string | null>(null)
   const [paymentId, setPaymentId] = useState<string | null>(null)
@@ -88,6 +99,15 @@ export default function PreorderPage({
   const [submitting, setSubmitting] = useState(false)
   const [paid, setPaid] = useState(false)
   const [totalPaid, setTotalPaid] = useState(0)
+
+  // Suggestion state
+  const [suggested, setSuggested] = useState<Suggested | null>(null)
+  const dismissedAtRef = useRef<number>(0)
+  const seenSuggestionsRef = useRef<Set<string>>(new Set())
+  const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const restaurantIdRef = useRef<string>('')
+
+  useEffect(() => { restaurantIdRef.current = restaurantId }, [restaurantId])
 
   useEffect(() => {
     const lang = navigator.language.toLowerCase()
@@ -121,6 +141,7 @@ export default function PreorderPage({
       .single()
 
     if (restaurant) {
+      setRestaurantId(restaurant.id)
       setRestaurantName(locale === 'th' ? restaurant.name_th : (restaurant.name_en || restaurant.name_th))
 
       const [{ data: cats }, { data: menuItems }, { data: links }] = await Promise.all([
@@ -159,6 +180,71 @@ export default function PreorderPage({
     setLoading(false)
   }
 
+  // Fetch AI suggestion
+  async function fetchSuggestion(currentCart: CartItem[]) {
+    const rid = restaurantIdRef.current
+    if (!rid || currentCart.length === 0) {
+      setSuggested(null)
+      return
+    }
+
+    if (Date.now() - dismissedAtRef.current < 30000) return
+
+    const cartCategories = Array.from(new Set(currentCart.map(c => c.menuItem.category_id)))
+
+    try {
+      const res = await fetch('/api/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          restaurant_id: rid,
+          cart_categories: cartCategories,
+          exclude_item_ids: Array.from(seenSuggestionsRef.current),
+        }),
+      })
+      const data = await res.json()
+      if (data.suggested_item) {
+        setSuggested(data.suggested_item)
+        seenSuggestionsRef.current.add(data.suggested_item.id)
+
+        if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
+        dismissTimerRef.current = setTimeout(() => {
+          setSuggested(null)
+        }, 10000)
+      }
+    } catch (err) {
+      console.warn('Suggestion fetch failed:', err)
+    }
+  }
+
+  function dismissSuggestion() {
+    dismissedAtRef.current = Date.now()
+    setSuggested(null)
+    if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current)
+  }
+
+  function addSuggestedToCart() {
+    if (!suggested) return
+    const menuItem = items.find(it => it.id === suggested.id)
+    if (!menuItem) {
+      dismissSuggestion()
+      return
+    }
+    // Bounce animation
+    setCartBounce(true)
+    setTimeout(() => setCartBounce(false), 600)
+
+    const groups = optionGroupsByItem[menuItem.id] ?? []
+    if (groups.length > 0) {
+      setPickingItem(menuItem)
+      setStep('option_picker')
+      dismissSuggestion()
+    } else {
+      addToCart(menuItem, [], '')
+      dismissSuggestion()
+    }
+  }
+
   useEffect(() => {
     if (!paymentId) return
     const channel = supabase
@@ -193,16 +279,18 @@ export default function PreorderPage({
 
   function addToCart(menuItem: MenuItem, selectedOptions: SelectedOption[], note: string) {
     const optDelta = selectedOptions.reduce((s, o) => s + o.price_delta * o.quantity, 0)
-    setCart(prev => [...prev, {
+    const newCart = [...cart, {
       cartId: crypto.randomUUID(),
       menuItem,
       quantity: 1,
       selectedOptions,
       note,
       unitPrice: menuItem.price + optDelta,
-    }])
+    }]
+    setCart(newCart)
     setPickingItem(null)
     setStep('items')
+    fetchSuggestion(newCart)
   }
 
   function updateCartQty(cartId: string, delta: number) {
@@ -255,6 +343,8 @@ export default function PreorderPage({
     setTotalPaid(data.total)
     setShowCart(false)
     setStep('payment')
+    seenSuggestionsRef.current.clear()
+    dismissSuggestion()
   }
 
   if (loading) return (
@@ -399,6 +489,55 @@ export default function PreorderPage({
     </div>
   )
 
+  const SuggestionBanner = suggested && (
+    <div className="fixed left-4 right-4 z-40 animate-slide-up" style={{ bottom: cartCount > 0 ? '88px' : '16px' }}>
+      <div className="bg-white border-2 border-purple-300 rounded-2xl shadow-xl p-3 flex items-center gap-3">
+        <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-purple-50 to-pink-50 overflow-hidden flex-shrink-0">
+          {suggested.image_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={suggested.image_url} alt="" className="w-full h-full object-cover object-center" />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-2xl">🍽️</div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[10px] text-purple-600 font-bold flex items-center gap-1">
+            <Sparkles size={10} /> {t('แนะนำ', 'Suggested', '推荐', 'おすすめ', '추천')}
+          </p>
+          <p className="font-bold text-gray-900 text-sm truncate">{suggested.name_th}</p>
+          <p className="text-xs text-gray-600 truncate">{suggested.reason}</p>
+        </div>
+        <div className="flex flex-col items-end gap-1 flex-shrink-0">
+          <button onClick={dismissSuggestion} className="text-gray-400 hover:text-gray-600">
+            <X size={16} />
+          </button>
+          <button
+            onClick={addSuggestedToCart}
+            className="bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold px-3 py-1.5 rounded-full whitespace-nowrap flex items-center gap-1"
+          >
+            ฿{suggested.price} <Plus size={12} />
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  const CartButton = cartCount > 0 && (
+    <div className="fixed bottom-4 left-4 right-4 z-40">
+      <button
+        onClick={() => setShowCart(true)}
+        className={`w-full text-white rounded-full py-3.5 px-5 flex items-center justify-between shadow-lg transition-all duration-300 ${cartBounce ? 'bg-green-400 scale-110 ring-4 ring-green-300' : 'bg-green-700 hover:bg-green-800'}`}
+      >
+        <span className="flex items-center gap-2">
+          <ShoppingCart size={20} className={`transition-transform duration-300 ${cartBounce ? 'scale-150 -rotate-12' : ''}`} />
+          <span className="bg-white text-green-700 text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center">{cartCount}</span>
+        </span>
+        <span className="font-bold">{t('ดูตะกร้า', 'View Cart', '查看', 'カート', '장바구니')}</span>
+        <span className="font-bold">฿{cartTotal.toLocaleString()}</span>
+      </button>
+    </div>
+  )
+
   if (step === 'categories') {
     return (
       <div className="min-h-screen bg-gray-50 pb-28">
@@ -427,20 +566,20 @@ export default function PreorderPage({
           })}
         </div>
 
-        {cartCount > 0 && (
-          <div className="fixed bottom-4 left-4 right-4 z-40">
-            <button onClick={() => setShowCart(true)} className="w-full bg-green-700 text-white rounded-full py-3.5 px-5 flex items-center justify-between shadow-lg">
-              <span className="flex items-center gap-2">
-                <ShoppingCart size={20} />
-                <span className="bg-white text-green-700 text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center">{cartCount}</span>
-              </span>
-              <span className="font-bold">{t('ดูตะกร้า', 'View Cart', '查看', 'カート', '장바구니')}</span>
-              <span className="font-bold">฿{cartTotal.toLocaleString()}</span>
-            </button>
-          </div>
-        )}
+        {SuggestionBanner}
+        {CartButton}
 
         {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} submitting={submitting} onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={submitOrder} />}
+
+        <style jsx>{`
+          @keyframes slide-up {
+            from { transform: translateY(120%); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+          }
+          .animate-slide-up {
+            animation: slide-up 0.3s ease-out;
+          }
+        `}</style>
       </div>
     )
   }
@@ -490,20 +629,20 @@ export default function PreorderPage({
         })}
       </div>
 
-      {cartCount > 0 && (
-        <div className="fixed bottom-4 left-4 right-4 z-40">
-          <button onClick={() => setShowCart(true)} className="w-full bg-green-700 text-white rounded-full py-3.5 px-5 flex items-center justify-between shadow-lg">
-            <span className="flex items-center gap-2">
-              <ShoppingCart size={20} />
-              <span className="bg-white text-green-700 text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center">{cartCount}</span>
-            </span>
-            <span className="font-bold">{t('ดูตะกร้า', 'View Cart', '查看', 'カート', '장바구니')}</span>
-            <span className="font-bold">฿{cartTotal.toLocaleString()}</span>
-          </button>
-        </div>
-      )}
+      {SuggestionBanner}
+      {CartButton}
 
       {showCart && <CartDrawer cart={cart} cartTotal={cartTotal} locale={locale} t={t} submitting={submitting} onClose={() => setShowCart(false)} onUpdateQty={updateCartQty} onRemove={removeCart} onContinue={() => { setShowCart(false); setStep('categories') }} onSubmit={submitOrder} />}
+
+      <style jsx>{`
+        @keyframes slide-up {
+          from { transform: translateY(120%); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        .animate-slide-up {
+          animation: slide-up 0.3s ease-out;
+        }
+      `}</style>
     </div>
   )
 }
