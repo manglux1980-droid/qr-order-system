@@ -25,6 +25,13 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
   const [error, setError] = useState<string | null>(null)
   const [paid, setPaid] = useState(false)
   const initRef = useRef(false)
+  const paidRef = useRef(false)
+  const paymentIdRef = useRef<string | null>(null)
+  const modeRef = useRef<Mode>('loading')
+
+  useEffect(() => { paidRef.current = paid }, [paid])
+  useEffect(() => { paymentIdRef.current = paymentId }, [paymentId])
+  useEffect(() => { modeRef.current = mode }, [mode])
 
   // ─── Initialize on mount ───
   useEffect(() => {
@@ -34,7 +41,6 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
   }, [])
 
   async function init() {
-    // 1. Fetch session → restaurant.payment_mode
     const { data: sess } = await supabase
       .from('table_sessions')
       .select('id, restaurants ( payment_mode )')
@@ -45,11 +51,9 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
     const paymentMode = (r as { payment_mode?: string } | null)?.payment_mode || 'manual'
 
     if (paymentMode === 'omise') {
-      // Old Omise flow — use existing Omise endpoint
       await initOmise()
       setMode('omise')
     } else {
-      // Manual or SMS — static PromptPay QR
       await initStatic()
       setMode('manual')
     }
@@ -67,7 +71,6 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
         setError(data.error || 'สร้าง QR ไม่สำเร็จ')
         return
       }
-      // Omise returns QR image directly
       setQrSvgDataUrl(data.qr_code || data.qr_image)
       setPaymentId(data.payment?.id || data.payment_id)
     } catch (e) {
@@ -98,6 +101,31 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
       const err = e as any
       setError(err.message)
     }
+  }
+
+  // ─── Cancel payment if user closes without paying ───
+  async function handleCancel() {
+    // If already paid, just close
+    if (paidRef.current) {
+      onClose()
+      return
+    }
+
+    // Only cancel for manual mode (static QR)
+    // For Omise — Omise will auto-expire and webhook handles it
+    const pid = paymentIdRef.current
+    if (modeRef.current === 'manual' && pid) {
+      try {
+        await fetch('/api/payments/cancel-static', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ payment_id: pid }),
+        })
+      } catch (e) {
+        console.warn('Cancel payment failed:', e)
+      }
+    }
+    onClose()
   }
 
   // ─── Realtime listen for payment status ───
@@ -132,14 +160,11 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
   // ─── QR rendering for static mode ───
   useEffect(() => {
     if (!qrPayload) return
-    // Use qrcode.react or external library? Let's generate via API.
-    // For simplicity, use a CDN-style QR generator
     renderQrCode(qrPayload)
   }, [qrPayload])
 
   async function renderQrCode(payload: string) {
     try {
-      // Dynamic import qrcode lib (will use installed library)
       const QRCode = await import('qrcode')
       const dataUrl = await QRCode.toDataURL(payload, {
         width: 320,
@@ -148,7 +173,6 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
       })
       setQrSvgDataUrl(dataUrl)
     } catch (e) {
-      // Fallback: use public QR API service
       console.warn('qrcode library not installed, using fallback:', e)
       const encoded = encodeURIComponent(payload)
       setQrSvgDataUrl(`https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encoded}`)
@@ -159,11 +183,11 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
   const sec = (remainingSec % 60).toString().padStart(2, '0')
 
   return (
-    <div className="fixed inset-0 z-[55] bg-black/60 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 z-[55] bg-black/60 flex items-center justify-center p-4" onClick={handleCancel}>
+      <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <h2 className="font-bold text-gray-900">ชำระเงิน</h2>
-          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-lg">
+          <button onClick={handleCancel} className="p-1 hover:bg-gray-100 rounded-lg">
             <X size={20} />
           </button>
         </div>
@@ -173,7 +197,7 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
             <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">
               ⚠️ {error}
             </div>
-            <button onClick={onClose} className="w-full mt-3 py-3 bg-gray-200 rounded-xl">ปิด</button>
+            <button onClick={handleCancel} className="w-full mt-3 py-3 bg-gray-200 rounded-xl">ปิด</button>
           </div>
         )}
 
@@ -235,6 +259,13 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
               <Loader2 size={14} className="animate-spin" />
               รอการชำระเงิน...
             </div>
+
+            <button
+              onClick={handleCancel}
+              className="mt-4 w-full py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50"
+            >
+              ยกเลิกการจ่าย QR
+            </button>
           </div>
         )}
       </div>
