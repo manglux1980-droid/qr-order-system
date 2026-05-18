@@ -23,37 +23,39 @@ type CashierSession = {
   items: BillItem[];
 };
 
+type PendingPayment = {
+  payment_id: string;
+  session_id: string;
+  table_number: number;
+  amount: number;
+  created_at: string;
+  expires_at: string;
+};
+
 let thaiVoiceCache: SpeechSynthesisVoice | null = null;
 let femaleVoiceCache: SpeechSynthesisVoice | null = null;
 
 function pickVoices() {
   const voices = speechSynthesis.getVoices();
   const thaiAll = voices.filter(v => v.lang.toLowerCase().startsWith('th'));
-
   if (thaiAll.length > 0) {
     thaiVoiceCache = thaiAll[0];
     const femaleKeywords = ['kanya', 'premwadee', 'narisa', 'female', 'หญิง', 'wavenet-a', 'wavenet-b'];
-    const female = thaiAll.find(v =>
-      femaleKeywords.some(k => v.name.toLowerCase().includes(k))
-    );
+    const female = thaiAll.find(v => femaleKeywords.some(k => v.name.toLowerCase().includes(k)));
     femaleVoiceCache = female || thaiAll[0];
   }
 }
 
-function speakThai(text: string, opts?: { female?: boolean; rate?: number; pitch?: number }) {
+function speakThai(text: string, opts?: { female?: boolean; pitch?: number }) {
   try {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'th-TH';
-    u.rate = opts?.rate ?? 1.0;
+    u.rate = 1.0;
     u.volume = 1.0;
     u.pitch = opts?.pitch ?? 1.0;
-
-    const voice = opts?.female
-      ? (femaleVoiceCache || thaiVoiceCache)
-      : thaiVoiceCache;
+    const voice = opts?.female ? (femaleVoiceCache || thaiVoiceCache) : thaiVoiceCache;
     if (voice) u.voice = voice;
-
     speechSynthesis.speak(u);
   } catch (e) {
     console.warn('Speech failed:', e);
@@ -62,10 +64,12 @@ function speakThai(text: string, opts?: { female?: boolean; rate?: number; pitch
 
 export default function CashierPage() {
   const [sessions, setSessions] = useState<CashierSession[]>([]);
+  const [pendingPayments, setPendingPayments] = useState<PendingPayment[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<CashierSession | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [closing, setClosing] = useState(false);
+  const [confirmingPaymentId, setConfirmingPaymentId] = useState<string | null>(null);
   const [soundOn, setSoundOn] = useState(true);
   const [voiceReady, setVoiceReady] = useState(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -79,9 +83,7 @@ export default function CashierPage() {
   useEffect(() => {
     function checkVoices() {
       pickVoices();
-      if (speechSynthesis.getVoices().length > 0) {
-        setVoiceReady(true);
-      }
+      if (speechSynthesis.getVoices().length > 0) setVoiceReady(true);
     }
     checkVoices();
     speechSynthesis.addEventListener('voiceschanged', checkVoices);
@@ -117,6 +119,7 @@ export default function CashierPage() {
   }, [unlockAudio]);
 
   const load = useCallback(async () => {
+    // Load sessions
     const res = await fetch('/api/cashier/sessions');
     const json = await res.json();
     if (res.ok) {
@@ -127,8 +130,62 @@ export default function CashierPage() {
           : null
       );
     }
+
+    // Load pending PromptPay payments
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { data: ru } = await supabase
+        .from('restaurant_users')
+        .select('restaurant_id')
+        .eq('user_id', user.id)
+        .single();
+
+      if (ru) {
+        const now = new Date().toISOString();
+        const { data: payments } = await supabase
+          .from('payments')
+          .select(`
+            id, session_id, amount, created_at, expires_at,
+            table_sessions ( tables ( table_number ) )
+          `)
+          .eq('restaurant_id', ru.restaurant_id)
+          .eq('status', 'pending_confirmation')
+          .gt('expires_at', now)
+          .order('created_at', { ascending: false });
+
+        type Row = {
+          id: string;
+          session_id: string;
+          amount: number;
+          created_at: string;
+          expires_at: string;
+          table_sessions: { tables: { table_number: number } | { table_number: number }[] | null } | { tables: { table_number: number } | { table_number: number }[] | null }[] | null;
+        };
+
+        function unwrap<T>(v: T | T[] | null | undefined): T | null {
+          if (!v) return null;
+          if (Array.isArray(v)) return v[0] ?? null;
+          return v;
+        }
+
+        const pending = ((payments as unknown) as Row[] ?? []).map(p => {
+          const sess = unwrap(p.table_sessions);
+          const tbl = sess ? unwrap(sess.tables) : null;
+          return {
+            payment_id: p.id,
+            session_id: p.session_id,
+            table_number: tbl?.table_number ?? 0,
+            amount: Number(p.amount),
+            created_at: p.created_at,
+            expires_at: p.expires_at,
+          };
+        });
+        setPendingPayments(pending);
+      }
+    }
+
     setLoading(false);
-  }, []);
+  }, [supabase]);
 
   function playDing(pattern: 'normal' | 'cash' = 'normal') {
     if (!audioUnlockedRef.current) return;
@@ -136,10 +193,8 @@ export default function CashierPage() {
       const ctx = audioCtxRef.current;
       if (!ctx) return;
       if (ctx.state === 'suspended') ctx.resume();
-
       const freqs = pattern === 'cash' ? [1320, 1056, 1584] : [880, 660];
       const interval = pattern === 'cash' ? 0.15 : 0.2;
-
       freqs.forEach((freq, i) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
@@ -188,9 +243,7 @@ export default function CashierPage() {
 
           if (newStatus === 'paying' && oldStatus !== 'paying') {
             onPayRequested(sess?.table_number, sess?.total);
-          }
-          else if (newStatus === 'closed' && oldStatus !== 'closed') {
-            // Only announce if there was a payment (not manual close)
+          } else if (newStatus === 'closed' && oldStatus !== 'closed') {
             if (sess && sess.total > 0) {
               onPaymentCompleted(sess?.total);
             }
@@ -199,6 +252,7 @@ export default function CashierPage() {
         load();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, () => load())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, () => load())
       .subscribe();
     return () => { supabase.removeChannel(channel); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -227,7 +281,6 @@ export default function CashierPage() {
       ? `⚠️ ปิดโต๊ะ #${session.table_number} โดยไม่รับเงิน?\n(มียอดค้าง ฿${session.total.toFixed(2)} — ใช้เมื่อลูกค้าออกไปแล้ว/ไม่จ่าย)`
       : `ปิดโต๊ะ #${session.table_number}?\n(ลูกค้าเปิดโต๊ะแต่ไม่สั่งอะไรเลย)`;
     if (!window.confirm(msg)) return;
-
     setClosing(true);
     const res = await fetch('/api/cashier/close-session', {
       method: 'POST',
@@ -244,11 +297,34 @@ export default function CashierPage() {
     load();
   }
 
+  async function confirmPayment(paymentId: string, tableNumber: number, amount: number) {
+    if (!window.confirm(`ยืนยันได้รับเงิน ฿${amount.toFixed(2)} จากโต๊ะ #${tableNumber}?`)) return;
+    setConfirmingPaymentId(paymentId);
+    const res = await fetch('/api/cashier/confirm-payment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payment_id: paymentId }),
+    });
+    setConfirmingPaymentId(null);
+    const json = await res.json();
+    if (!res.ok) {
+      alert(json.error || 'ยืนยันไม่สำเร็จ');
+      return;
+    }
+    load();
+  }
+
   function elapsed(iso: string) {
     const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
-    if (diff < 1) return 'เพิ่งเปิด';
+    if (diff < 1) return 'เพิ่งกด';
     if (diff < 60) return `${diff} นาที`;
     return `${Math.floor(diff / 60)} ชม. ${diff % 60} นาที`;
+  }
+
+  function remaining(iso: string) {
+    const diff = Math.floor((new Date(iso).getTime() - Date.now()) / 60000);
+    if (diff < 0) return 'หมดอายุ';
+    return `${diff} นาที`;
   }
 
   function testPayRequest() {
@@ -276,10 +352,7 @@ export default function CashierPage() {
             💵 ทดสอบ &quot;เงินเข้า&quot;
           </button>
           <button
-            onClick={() => {
-              setSoundOn((s) => !s);
-              unlockAudio();
-            }}
+            onClick={() => { setSoundOn((s) => !s); unlockAudio(); }}
             className="px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
           >
             {soundOn ? '🔊 เสียงเปิด' : '🔇 เสียงปิด'}
@@ -298,11 +371,46 @@ export default function CashierPage() {
       {!loading && (
         <div className="grid lg:grid-cols-2 gap-6">
           <div>
+            {/* Pending PromptPay payments */}
+            {pendingPayments.length > 0 && (
+              <section className="mb-6">
+                <h2 className="text-sm font-bold text-blue-700 mb-2 flex items-center gap-2">
+                  <span className="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                  รอยืนยันการจ่าย ({pendingPayments.length})
+                </h2>
+                <div className="space-y-2">
+                  {pendingPayments.map((p) => (
+                    <div key={p.payment_id} className="p-4 rounded-xl border-2 border-blue-300 bg-blue-50">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-14 h-14 rounded-lg bg-blue-600 text-white flex flex-col items-center justify-center font-bold">
+                          <div className="text-[10px]">โต๊ะ</div>
+                          <div className="text-xl leading-none">#{p.table_number}</div>
+                        </div>
+                        <div className="flex-1">
+                          <div className="text-lg font-bold text-gray-900">฿{p.amount.toFixed(2)}</div>
+                          <div className="text-xs text-gray-600">
+                            สแกน QR แล้ว · {elapsed(p.created_at)} · เหลือ {remaining(p.expires_at)}
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => confirmPayment(p.payment_id, p.table_number, p.amount)}
+                        disabled={confirmingPaymentId === p.payment_id}
+                        className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg disabled:opacity-50"
+                      >
+                        {confirmingPaymentId === p.payment_id ? 'กำลังยืนยัน...' : '✓ ยืนยันได้รับเงิน'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
             {requesting.length > 0 && (
               <section className="mb-6">
                 <h2 className="text-sm font-bold text-orange-700 mb-2 flex items-center gap-2">
                   <span className="inline-block w-2 h-2 bg-orange-500 rounded-full animate-pulse" />
-                  เรียกเก็บเงิน ({requesting.length})
+                  เรียกเก็บเงินที่เคาน์เตอร์ ({requesting.length})
                 </h2>
                 <div className="space-y-2">
                   {requesting.map((s) => (
@@ -314,7 +422,7 @@ export default function CashierPage() {
 
             <section>
               <h2 className="text-sm font-bold text-gray-700 mb-2">โต๊ะที่เปิดอยู่ ({active.length})</h2>
-              {active.length === 0 && requesting.length === 0 ? (
+              {active.length === 0 && requesting.length === 0 && pendingPayments.length === 0 ? (
                 <div className="text-center py-12 bg-white border border-gray-200 rounded-xl">
                   <div className="text-4xl mb-2">😌</div>
                   <p className="text-gray-600">ยังไม่มีโต๊ะใช้งาน</p>
@@ -429,7 +537,7 @@ function BillDetail({ session, onCheckout, onCloseSession, submitting, closing }
             disabled={submitting || closing}
             className="mt-6 w-full py-4 bg-green-600 text-white font-bold text-lg rounded-xl hover:bg-green-700 disabled:opacity-50"
           >
-            {submitting ? 'กำลังบันทึก...' : `✓ รับเงิน ฿${session.total.toFixed(2)}`}
+            {submitting ? 'กำลังบันทึก...' : `✓ รับเงินสด ฿${session.total.toFixed(2)}`}
           </button>
         )}
 

@@ -1,163 +1,243 @@
-'use client';
+'use client'
 
-import { useEffect, useState } from 'react';
-import { createClient } from '@/lib/supabase/client';
-
-type Method = 'promptpay' | 'alipay_plus' | 'truemoney';
+import { useEffect, useState, useRef } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import { Loader2, X, Check } from 'lucide-react'
 
 type Props = {
-  sessionId: string;
-  amount: number;
-  onClose: () => void;
-  onPaid: () => void;
-};
+  sessionId: string
+  amount: number
+  onClose: () => void
+  onPaid: () => void
+}
 
-type Stage = 'choose' | 'omise_waiting' | 'paid' | 'error';
+type Mode = 'omise' | 'manual' | 'loading'
 
 export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Props) {
-  const [stage, setStage] = useState<Stage>('choose');
-  const [paymentId, setPaymentId] = useState<string | null>(null);
-  const [qrCode, setQrCode] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const supabase = createClient()
+  const [mode, setMode] = useState<Mode>('loading')
+  const [qrPayload, setQrPayload] = useState<string | null>(null)
+  const [qrSvgDataUrl, setQrSvgDataUrl] = useState<string | null>(null)
+  const [paymentId, setPaymentId] = useState<string | null>(null)
+  const [promptpayName, setPromptpayName] = useState<string | null>(null)
+  const [expiresAt, setExpiresAt] = useState<string | null>(null)
+  const [remainingSec, setRemainingSec] = useState(600)
+  const [error, setError] = useState<string | null>(null)
+  const [paid, setPaid] = useState(false)
+  const initRef = useRef(false)
 
-  const supabase = createClient();
-
+  // ─── Initialize on mount ───
   useEffect(() => {
-    if (!paymentId) return;
-    const channel = supabase
-      .channel(`payment-${paymentId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'payments',
-          filter: `id=eq.${paymentId}`,
-        },
-        (payload) => {
-          const row = payload.new as { status: string };
-          if (row.status === 'paid') {
-            setStage('paid');
-            setTimeout(onPaid, 1500);
-          }
-        }
-      )
-      .subscribe();
+    if (initRef.current) return
+    initRef.current = true
+    init()
+  }, [])
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [paymentId, onPaid, supabase]);
+  async function init() {
+    // 1. Fetch session → restaurant.payment_mode
+    const { data: sess } = await supabase
+      .from('table_sessions')
+      .select('id, restaurants ( payment_mode )')
+      .eq('id', sessionId)
+      .single()
 
-  async function submit(method: Method) {
-    setSubmitting(true);
-    setError(null);
+    const r = Array.isArray(sess?.restaurants) ? sess!.restaurants[0] : sess?.restaurants
+    const paymentMode = (r as { payment_mode?: string } | null)?.payment_mode || 'manual'
+
+    if (paymentMode === 'omise') {
+      // Old Omise flow — use existing Omise endpoint
+      await initOmise()
+      setMode('omise')
+    } else {
+      // Manual or SMS — static PromptPay QR
+      await initStatic()
+      setMode('manual')
+    }
+  }
+
+  async function initOmise() {
     try {
       const res = await fetch('/api/payments/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, method, amount }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'failed');
-
-      setPaymentId(json.payment.id);
-      setQrCode(json.qr_code);
-      setStage('omise_waiting');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
-      setStage('error');
-    } finally {
-      setSubmitting(false);
+        body: JSON.stringify({ session_id: sessionId, amount }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setError(data.error || 'สร้าง QR ไม่สำเร็จ')
+        return
+      }
+      // Omise returns QR image directly
+      setQrSvgDataUrl(data.qr_code || data.qr_image)
+      setPaymentId(data.payment_id)
+    } catch (e) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const err = e as any
+      setError(err.message)
     }
   }
 
+  async function initStatic() {
+    try {
+      const res = await fetch('/api/payments/create-static', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, amount }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setError(data.error || 'สร้าง QR ไม่สำเร็จ')
+        return
+      }
+      setQrPayload(data.qr_payload)
+      setPaymentId(data.payment_id)
+      setPromptpayName(data.promptpay_name)
+      setExpiresAt(data.expires_at)
+    } catch (e) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const err = e as any
+      setError(err.message)
+    }
+  }
+
+  // ─── Realtime listen for payment status ───
+  useEffect(() => {
+    if (!paymentId) return
+    const channel = supabase
+      .channel(`payment-${paymentId}`)
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'payments', filter: `id=eq.${paymentId}`,
+      }, (payload) => {
+        const row = payload.new as { status: string }
+        if (row.status === 'paid') {
+          setPaid(true)
+          setTimeout(() => onPaid(), 2000)
+        }
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [paymentId, supabase, onPaid])
+
+  // ─── Countdown ───
+  useEffect(() => {
+    if (!expiresAt) return
+    const interval = setInterval(() => {
+      const remaining = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000))
+      setRemainingSec(remaining)
+      if (remaining === 0) clearInterval(interval)
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [expiresAt])
+
+  // ─── QR rendering for static mode ───
+  useEffect(() => {
+    if (!qrPayload) return
+    // Use qrcode.react or external library? Let's generate via API.
+    // For simplicity, use a CDN-style QR generator
+    renderQrCode(qrPayload)
+  }, [qrPayload])
+
+  async function renderQrCode(payload: string) {
+    try {
+      // Dynamic import qrcode lib (will use installed library)
+      const QRCode = await import('qrcode')
+      const dataUrl = await QRCode.toDataURL(payload, {
+        width: 320,
+        margin: 1,
+        errorCorrectionLevel: 'M',
+      })
+      setQrSvgDataUrl(dataUrl)
+    } catch (e) {
+      // Fallback: use public QR API service
+      console.warn('qrcode library not installed, using fallback:', e)
+      const encoded = encodeURIComponent(payload)
+      setQrSvgDataUrl(`https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encoded}`)
+    }
+  }
+
+  const min = Math.floor(remainingSec / 60).toString().padStart(2, '0')
+  const sec = (remainingSec % 60).toString().padStart(2, '0')
+
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md p-6 text-gray-900">
-        {stage === 'choose' && (
-          <>
-            <h2 className="text-xl font-bold mb-1">จ่ายด้วย QR</h2>
-            <p className="text-3xl font-bold text-orange-600 mb-6">
-              ฿{amount.toFixed(2)}
+    <div className="fixed inset-0 z-[55] bg-black/60 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <h2 className="font-bold text-gray-900">ชำระเงิน</h2>
+          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-lg">
+            <X size={20} />
+          </button>
+        </div>
+
+        {error && (
+          <div className="p-5">
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">
+              ⚠️ {error}
+            </div>
+            <button onClick={onClose} className="w-full mt-3 py-3 bg-gray-200 rounded-xl">ปิด</button>
+          </div>
+        )}
+
+        {!error && mode === 'loading' && (
+          <div className="p-10 text-center">
+            <Loader2 className="animate-spin mx-auto text-orange-500 mb-3" size={32} />
+            <p className="text-sm text-gray-600">กำลังสร้าง QR...</p>
+          </div>
+        )}
+
+        {!error && paid && (
+          <div className="p-8 text-center">
+            <div className="w-20 h-20 mx-auto rounded-full bg-green-100 flex items-center justify-center mb-4">
+              <Check size={48} className="text-green-600" />
+            </div>
+            <h3 className="text-2xl font-bold text-green-700 mb-2">ชำระเงินสำเร็จ</h3>
+            <p className="text-gray-600">ขอบคุณค่ะ 🙏</p>
+          </div>
+        )}
+
+        {!error && !paid && mode !== 'loading' && qrSvgDataUrl && (
+          <div className="p-5 text-center">
+            <p className="text-xs text-gray-600 mb-1">
+              {mode === 'omise' ? 'Omise PromptPay' : '📱 สแกนเพื่อโอนเงิน'}
+            </p>
+            <p className="text-3xl font-bold text-orange-600 mb-3">
+              ฿{amount.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </p>
 
-            <div className="space-y-3">
-              <button
-                disabled={submitting}
-                onClick={() => submit('promptpay')}
-                className="w-full p-4 border-2 border-gray-300 rounded-xl hover:border-orange-500 hover:bg-orange-50 text-left disabled:opacity-50"
-              >
-                <div className="font-semibold">📱 PromptPay</div>
-                <div className="text-sm text-gray-600">สแกน QR ด้วยแอปธนาคาร</div>
-              </button>
-
-              <button
-                disabled={submitting}
-                onClick={() => submit('alipay_plus')}
-                className="w-full p-4 border-2 border-gray-300 rounded-xl hover:border-orange-500 hover:bg-orange-50 text-left disabled:opacity-50"
-              >
-                <div className="font-semibold">🌍 Alipay+ / TrueMoney</div>
-                <div className="text-sm text-gray-600">35+ wallets นักท่องเที่ยว</div>
-              </button>
+            <div className="inline-block bg-white p-4 rounded-2xl border-2 border-gray-200 mb-3">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={qrSvgDataUrl} alt="QR Code" className="w-64 h-64" />
             </div>
 
-            <button
-              onClick={onClose}
-              className="mt-4 w-full py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
-            >
-              ยกเลิก
-            </button>
-          </>
-        )}
-
-        {stage === 'omise_waiting' && (
-          <div className="text-center">
-            <h2 className="text-xl font-bold mb-3">สแกนเพื่อชำระเงิน</h2>
-            {qrCode && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={qrCode} alt="Payment QR" className="mx-auto w-64 h-64" />
+            {promptpayName && (
+              <p className="text-sm text-gray-700 font-medium mb-1">
+                ผู้รับ: {promptpayName}
+              </p>
             )}
-            <p className="text-3xl font-bold text-orange-600 mt-4">
-              ฿{amount.toFixed(2)}
-            </p>
-            <p className="text-sm text-gray-500 mt-2 mb-4">
-              ระบบจะอัปเดตเมื่อชำระเงินสำเร็จ
-            </p>
-            <button
-              onClick={onClose}
-              className="w-full py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
-            >
-              ปิด
-            </button>
-          </div>
-        )}
 
-        {stage === 'paid' && (
-          <div className="text-center py-6">
-            <div className="text-6xl mb-3">✅</div>
-            <h2 className="text-2xl font-bold text-green-600 mb-2">
-              ชำระเงินสำเร็จ
-            </h2>
-            <p className="text-gray-700">ขอบคุณที่ใช้บริการ</p>
-          </div>
-        )}
+            {mode === 'manual' && expiresAt && (
+              <p className={`text-sm font-medium mb-3 ${remainingSec < 60 ? 'text-red-600' : 'text-gray-600'}`}>
+                ⏱ QR หมดอายุใน {min}:{sec}
+              </p>
+            )}
 
-        {stage === 'error' && (
-          <div className="text-center py-4">
-            <div className="text-4xl mb-3">⚠️</div>
-            <h2 className="text-lg font-bold text-red-600 mb-2">เกิดข้อผิดพลาด</h2>
-            <p className="text-gray-700 mb-4">{error}</p>
-            <button
-              onClick={() => setStage('choose')}
-              className="w-full py-3 bg-orange-500 text-white rounded-xl font-semibold"
-            >
-              ลองอีกครั้ง
-            </button>
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-gray-700 text-left mt-4">
+              <p className="font-semibold mb-1">📌 วิธีจ่ายเงิน:</p>
+              <p>1. เปิด app ธนาคารของคุณ</p>
+              <p>2. สแกน QR Code ด้านบน</p>
+              <p>3. ยืนยันการโอนเงิน</p>
+              <p className="text-orange-700 mt-2">
+                ⏳ หลังโอนเสร็จ ระบบจะยืนยันอัตโนมัติ
+                {mode === 'manual' && ' (หรือแม่ค้าจะยืนยันให้)'}
+              </p>
+            </div>
+
+            <div className="flex items-center justify-center gap-2 mt-4 text-xs text-gray-500">
+              <Loader2 size={14} className="animate-spin" />
+              รอการชำระเงิน...
+            </div>
           </div>
         )}
       </div>
     </div>
-  );
+  )
 }
