@@ -60,7 +60,7 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
       const res = await fetch('/api/payments/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, amount }),
+        body: JSON.stringify({ session_id: sessionId, amount, method: 'promptpay' }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -69,7 +69,7 @@ export default function PaymentModal({ sessionId, amount, onClose, onPaid }: Pro
       }
       // Omise returns QR image directly
       setQrSvgDataUrl(data.qr_code || data.qr_image)
-      setPaymentId(data.payment_id)
+      setPaymentId(data.payment?.id || data.payment_id)
     } catch (e) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const err = e as any
