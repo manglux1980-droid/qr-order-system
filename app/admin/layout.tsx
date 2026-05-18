@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { UtensilsCrossed, QrCode, LayoutDashboard, LogOut, ChefHat, CreditCard, SlidersHorizontal, Smartphone } from 'lucide-react'
+import { UtensilsCrossed, QrCode, LayoutDashboard, LogOut, ChefHat, CreditCard, SlidersHorizontal, Smartphone, Settings } from 'lucide-react'
 
 const navItems = [
   // Setup
@@ -16,6 +16,7 @@ const navItems = [
   { href: '/admin/cashier', label: 'แคชเชียร์', icon: CreditCard },
   // Insights
   { href: '/admin/dashboard', label: 'ภาพรวม', icon: LayoutDashboard },
+  { href: '/admin/settings', label: 'ตั้งค่า', icon: Settings },
 ]
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
