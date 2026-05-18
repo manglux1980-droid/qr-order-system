@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
         restaurant_id: r.id,
         amount,
         amount_expected: amount,
-        method: 'promptpay_static',
+        method: 'promptpay',
         status: 'pending_confirmation',
         expires_at: expiresAt,
       })
