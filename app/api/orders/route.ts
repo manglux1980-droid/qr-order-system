@@ -16,17 +16,28 @@ export async function POST(req: NextRequest) {
 
   const supabase = await createServiceClient()
 
-  const rows = items.map((item: {
+  type IncomingItem = {
     menu_item_id: string
     quantity: number
     price_snapshot: number
     note?: string
-  }) => ({
+    options_snapshot?: Array<{
+      group_id: string
+      group_name: string
+      option_id: string
+      option_name: string
+      price_delta: number
+      quantity: number
+    }>
+  }
+
+  const rows = (items as IncomingItem[]).map((item) => ({
     order_id,
     menu_item_id: item.menu_item_id,
     quantity: item.quantity,
     price_snapshot: item.price_snapshot,
     note: item.note || null,
+    options_snapshot: item.options_snapshot ?? [],
     status: 'pending',
   }))
 
